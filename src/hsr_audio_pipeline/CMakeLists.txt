@@ -22,6 +22,7 @@ catkin_install_python(
     scripts/silero_vad_node.py
     scripts/faster_whisper_asr_node.py
     scripts/faster_whisper_asr_simple_node.py
+    scripts/gpsr_intent_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
