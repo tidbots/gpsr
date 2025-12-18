@@ -1,4 +1,13 @@
-# gpsr
+# General Purpose Service Robot 汎用サービスロボット
+ロボットは、幅広く異なる能力を必要とする命令を理解し実行することが求められる。
+
+
+##　CommandGenerator
+[CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
+
+
+
+
 
 ## 1. ROS パッケージ構成（例）
 ```
