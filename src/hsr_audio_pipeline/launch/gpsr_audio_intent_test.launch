@@ -1,0 +1,36 @@
+<launch>
+  <!-- audio_capture -->
+  <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
+    <param name="sample_rate" value="16000" />
+    <param name="channels" value="1" />
+    <param name="format" value="wave" />
+    <param name="sample_format" value="S16LE" />
+    <param name="device" value="" />
+  </node>
+
+  <!-- 任意: RMS monitor -->
+  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
+    <param name="topic" value="/audio/audio" />
+    <param name="sample_format" value="S16LE" />
+    <param name="log_interval" value="50" />
+  </node>
+
+  <!-- シンプル ASR -->
+  <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_simple_node.py"
+        name="faster_whisper_asr_simple_node" output="screen">
+    <param name="audio_topic" value="/audio/audio" />
+    <param name="sample_rate" value="16000" />
+    <param name="segment_sec" value="2.0" />
+    <param name="model_size" value="tiny" />
+    <param name="device" value="cpu" />
+    <param name="compute_type" value="float32" />
+    <param name="language" value="ja" />
+  </node>
+
+  <!-- GPSR Intent ノード -->
+  <node pkg="hsr_audio_pipeline" type="gpsr_intent_node.py"
+        name="gpsr_intent_node" output="screen">
+    <param name="asr_topic" value="/asr/text" />
+    <param name="intent_topic" value="/gpsr/intent" />
+  </node>
+</launch>
