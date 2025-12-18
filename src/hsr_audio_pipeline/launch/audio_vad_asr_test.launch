@@ -19,9 +19,8 @@
   <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad_node" output="screen">
     <param name="audio_topic" value="/audio/audio" />
     <param name="sample_rate" value="16000" />
-    <param name="speech_threshold" value="0.5" />
-    <param name="log_interval" value="50" />
-    <!-- min_samples は 512 デフォルトのままでOK -->
+    <param name="speech_threshold" value="0.4" />  <!-- 0.5 → 0.4 に下げる -->
+    <param name="log_interval" value="20" />
   </node>
 
   <!-- faster-whisper ASR -->
@@ -29,8 +28,8 @@
     <param name="audio_topic" value="/audio/audio" />
     <param name="vad_topic" value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
-    <param name="min_segment_sec" value="0.3" />
-    <param name="max_segment_sec" value="10.0" />
+    <param name="min_segment_sec" value="0.2" />   <!-- 0.3 → 0.2 -->
+    <param name="max_segment_sec" value="5.0" />   <!-- 10 → 5 秒 -->
     <param name="model_size" value="small" />
     <param name="device" value="cpu" />
     <param name="compute_type" value="float32" />
