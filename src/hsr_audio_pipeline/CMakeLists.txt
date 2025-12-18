@@ -1,1 +1,24 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(hsr_audio_pipeline)
+
+find_package(catkin REQUIRED COMPONENTS
+  rospy
+  std_msgs
+  audio_common_msgs
+)
+
+catkin_package(
+  CATKIN_DEPENDS rospy std_msgs audio_common_msgs
+)
+
+include_directories(
+  ${catkin_INCLUDE_DIRS}
+)
+
+# Pythonノードのインストール設定
+catkin_install_python(
+  PROGRAMS
+    scripts/audio_rms_monitor.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
