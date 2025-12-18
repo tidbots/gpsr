@@ -1,0 +1,17 @@
+<launch>
+  <!-- audio_capture ノード（名前空間 /audio の中で動く） -->
+  <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
+    <param name="sample_rate" value="16000" />
+    <param name="channels" value="1" />
+    <param name="format" value="wave" />
+    <param name="sample_format" value="S16LE" />
+    <param name="device" value="" />  <!-- 必要なら hw:0,0 などに変更 -->
+  </node>
+
+  <!-- RMSモニタノード -->
+  <!-- デフォルトで /audio/audio を見るので param topic は省略してもOK -->
+  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
+    <param name="sample_format" value="S16LE" />
+    <param name="log_interval" value="10" />
+  </node>
+</launch>
