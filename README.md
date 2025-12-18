@@ -215,3 +215,23 @@ nav_wrapper が「足」、
 task_executor が「手・口」という分担です。
 ```
 
+
+```
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose up -d --build
+```
+
+```
+docker compose exec noetic-audio bash
+roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
+```
+```
+docker compose exec noetic-audio bash
+rostopic echo /gpsr/intent
+```
+```
+docker compose exec noetic-audio bash
+rostopic echo /asr/text
+```
+
+
