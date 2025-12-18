@@ -1,1 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>hsr_audio_pipeline</name>
+  <version>0.0.1</version>
+  <description>Audio pipeline for HSR GPSR system (audio_capture + monitor + VAD/ASR later)</description>
 
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>BSD</license>
+
+  <!-- ROS build tool -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- ROS dependencies -->
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>audio_common_msgs</depend>
+
+  <!-- Pythonライブラリ用（RMS計算でnumpy使用） -->
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+  </export>
+</package>
