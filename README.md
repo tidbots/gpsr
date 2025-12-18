@@ -1,6 +1,7 @@
 # gpsr
 
 ## 1. ROS パッケージ構成（例）
+```
 hsr_gpsr_system/          （メタパッケージ or リポジトリルート）
 ├── hsr_gpsr_bringup/     … 全体起動用 launch・設定
 ├── hsr_audio_pipeline/   … audio_capture + Silero VAD + Whisper(faster-whisper)
@@ -9,31 +10,21 @@ hsr_gpsr_system/          （メタパッケージ or リポジトリルート�
 ├── hsr_nav_wrapper/      … nav stack のラッパ（ゴール指示、状態取得）
 ├── hsr_task_executor/    … 物体操作・対話などの実行インタフェース
 └── hsr_msgs/             … 本システム専用のメッセージ/サービス定義（必要なら）
-
+```
 ## 2. 各ノードの役割
-audio 系
+### audio 系
+#### 1. audio_capture ノード（既存パッケージ）
+- 役割: マイク入力 → /audio (AudioData) に配信
+- パラメータでサンプリングレート・フォーマットなどを設定
+- Docker コンテナ内の ALSA/PulseAudio とホストをブリッジ
 
-audio_capture ノード（既存パッケージ）
-
-役割: マイク入力 → /audio (AudioData) に配信
-
-パラメータでサンプリングレート・フォーマットなどを設定
-
-Docker コンテナ内の ALSA/PulseAudio とホストをブリッジ
-
-silero_vad_node（hsr_audio_pipeline 内）
-
-入力: /audio (audio_common_msgs/AudioData)
-
-出力: /vad/segments（発話区間の開始・終了、VADフラグ 等）
-
-役割:
-
-Silero VAD で「今しゃべっているかどうか」を検出
-
-Whisper に渡す音声区間を切り出すトリガを出す
-
-ノイズの多い環境での余分な音声入力を抑える
+### 2. silero_vad_node（hsr_audio_pipeline 内）
+- 入力: /audio (audio_common_msgs/AudioData)
+- 出力: /vad/segments（発話区間の開始・終了、VADフラグ 等）
+- 役割:
+  - Silero VAD で「今しゃべっているかどうか」を検出
+  - Whisper に渡す音声区間を切り出すトリガを出す
+  - ノイズの多い環境での余分な音声入力を抑える
 
 faster_whisper_asr_node（hsr_audio_pipeline 内）
 
