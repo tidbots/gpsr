@@ -15,8 +15,8 @@ class SileroVADNode(object):
         self.sample_rate = rospy.get_param("~sample_rate", 16000)
         self.speech_threshold = rospy.get_param("~speech_threshold", 0.5)
         self.log_interval = rospy.get_param("~log_interval", 50)
-        # 16kHz で 100ms = 1600 サンプル
-        self.min_samples = rospy.get_param("~min_samples", 1600)
+        # ★ Silero VAD の仕様に合わせて 512 サンプル
+        self.min_samples = rospy.get_param("~min_samples", 512)
 
         self.frame_count = 0
         self.buffer = np.zeros(0, dtype=np.float32)
@@ -24,7 +24,6 @@ class SileroVADNode(object):
         rospy.loginfo("SileroVADNode: loading Silero VAD model...")
         torch.set_num_threads(1)
 
-        # Silero VAD モデル読み込み
         self.model, self.utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
@@ -67,32 +66,29 @@ class SileroVADNode(object):
         else:
             self.buffer = np.concatenate([self.buffer, audio_float])
 
-        # 最低サンプル数に達していなければまだ推定しない
+        # 512 サンプルたまるまで待つ
         if self.buffer.size < self.min_samples:
             return
 
-        # 直近 min_samples 分だけ取り出して判定（100msくらい）
+        # ★ 直近 512 サンプルだけを使う（Silero VAD が期待している長さ）
         chunk = self.buffer[-self.min_samples:]
 
-        # バッファが大きくなりすぎないように、最後の 2 * min_samples だけ保持
+        # バッファは最大 2 * 512 サンプルだけ残す
         max_buffer = self.min_samples * 2
         if self.buffer.size > max_buffer:
             self.buffer = self.buffer[-max_buffer:]
 
-        # Torch tensor へ
-        audio_tensor = torch.from_numpy(chunk)
+        # Torch tensor へ（バッチ1, 長さ512）
+        audio_tensor = torch.from_numpy(chunk).unsqueeze(0)
 
-        # === Silero VAD 推論 ===
         try:
             with torch.no_grad():
                 probs = self.model(audio_tensor, self.sample_rate).cpu().numpy()
         except Exception as e:
-            # 安全のため例外を握りつぶしてログだけ
             if self.frame_count % self.log_interval == 0:
                 rospy.logerr("SileroVADNode: model forward failed: %s", e)
             return
 
-        # 出力 shape によって処理を分ける
         if probs.ndim == 1:
             speech_prob = float(probs[-1])
         elif probs.ndim == 2:
@@ -102,7 +98,6 @@ class SileroVADNode(object):
 
         is_speech = speech_prob >= self.speech_threshold
 
-        # publish
         self.pub_is_speech.publish(Bool(data=is_speech))
         self.pub_prob.publish(Float32(data=speech_prob))
 
