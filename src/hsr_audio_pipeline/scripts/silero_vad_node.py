@@ -7,18 +7,6 @@ import torch
 from std_msgs.msg import Bool, Float32
 from audio_common_msgs.msg import AudioData
 
-"""
-Silero VAD を使って /audio/audio から
-・/vad/is_speech (Bool)
-・/vad/probability (Float32)
-を出すノード。
-
-※ 注意
-  - Silero VAD の詳細なAPIはバージョンで少し変わることがあります。
-  - ここでは torch.hub を使う想定の「典型的な」使い方を書いています。
-  - 実際に動かすときは、公式README (snakers4/silero-vad) に合わせて
-    `get_speech_timestamps` や `VADIterator` の使い方を微調整してください。
-"""
 
 class SileroVADNode(object):
     def __init__(self):
@@ -26,16 +14,17 @@ class SileroVADNode(object):
         audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
         self.sample_rate = rospy.get_param("~sample_rate", 16000)
         self.speech_threshold = rospy.get_param("~speech_threshold", 0.5)
-        self.log_interval = rospy.get_param("~log_interval", 50)  # 何フレームごとにログを出すか
+        self.log_interval = rospy.get_param("~log_interval", 50)
+        # 16kHz で 100ms = 1600 サンプル
+        self.min_samples = rospy.get_param("~min_samples", 1600)
 
         self.frame_count = 0
+        self.buffer = np.zeros(0, dtype=np.float32)
 
         rospy.loginfo("SileroVADNode: loading Silero VAD model...")
-
-        # ★ Silero VAD モデル読み込み
-        #   初回実行時はインターネット経由でモデルを取得する必要があります
-        #   （オフライン運用する場合は、事前にイメージ内にキャッシュしておくなどの工夫が必要）
         torch.set_num_threads(1)
+
+        # Silero VAD モデル読み込み
         self.model, self.utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
@@ -65,31 +54,50 @@ class SileroVADNode(object):
                 rospy.logwarn("SileroVADNode: odd buffer length: %d", len(buf))
             return
 
-        # int16 PCM → [-1, 1] の float32 に正規化
+        # 16bit PCM → float32 [-1, 1]
         samples = np.frombuffer(buf, dtype="<i2").astype(np.float32)
         if samples.size == 0:
             return
 
         audio_float = samples / 32768.0
 
-        # PyTorch Tensor に変換（バッチ1, 時系列長）
-        audio_tensor = torch.from_numpy(audio_float).unsqueeze(0)
+        # ---- バッファに追記 ----
+        if self.buffer.size == 0:
+            self.buffer = audio_float
+        else:
+            self.buffer = np.concatenate([self.buffer, audio_float])
 
-        # === Silero VAD で確率を計算 ===
-        # Silero VAD モデルは、入力 audio_tensor と sample_rate から
-        # フレームごとの "speech probability" を返す仕様になっています。
-        #
-        # 実際の戻り値の shape / 使い方はバージョンに依存するので、
-        # 必要に応じて print で確認しながら調整してください。
-        with torch.no_grad():
-            probs = self.model(audio_tensor, self.sample_rate).cpu().numpy()
+        # 最低サンプル数に達していなければまだ推定しない
+        if self.buffer.size < self.min_samples:
+            return
 
-        # ここでは簡単のため、「最後のフレームの確率」を代表値として利用
-        # probs.shape は (1, N) 想定 → probs[0, -1]
-        if probs.ndim == 2:
+        # 直近 min_samples 分だけ取り出して判定（100msくらい）
+        chunk = self.buffer[-self.min_samples:]
+
+        # バッファが大きくなりすぎないように、最後の 2 * min_samples だけ保持
+        max_buffer = self.min_samples * 2
+        if self.buffer.size > max_buffer:
+            self.buffer = self.buffer[-max_buffer:]
+
+        # Torch tensor へ
+        audio_tensor = torch.from_numpy(chunk)
+
+        # === Silero VAD 推論 ===
+        try:
+            with torch.no_grad():
+                probs = self.model(audio_tensor, self.sample_rate).cpu().numpy()
+        except Exception as e:
+            # 安全のため例外を握りつぶしてログだけ
+            if self.frame_count % self.log_interval == 0:
+                rospy.logerr("SileroVADNode: model forward failed: %s", e)
+            return
+
+        # 出力 shape によって処理を分ける
+        if probs.ndim == 1:
+            speech_prob = float(probs[-1])
+        elif probs.ndim == 2:
             speech_prob = float(probs[0, -1])
         else:
-            # 何か想定外の shape の場合は平均値を使う
             speech_prob = float(probs.mean())
 
         is_speech = speech_prob >= self.speech_threshold
@@ -100,8 +108,8 @@ class SileroVADNode(object):
 
         if self.frame_count % self.log_interval == 0:
             rospy.loginfo(
-                "SileroVADNode: prob=%.3f -> is_speech=%s",
-                speech_prob, is_speech
+                "SileroVADNode: prob=%.3f -> is_speech=%s (buffer=%d)",
+                speech_prob, is_speech, self.buffer.size
             )
 
 
