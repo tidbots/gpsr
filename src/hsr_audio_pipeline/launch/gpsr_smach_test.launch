@@ -1,0 +1,12 @@
+<launch>
+  <!-- audio → ASR → intent -->
+  <include file="$(find hsr_audio_pipeline)/launch/gpsr_audio_intent_test.launch" />
+
+  <!-- GPSR SMACH ノード -->
+  <node pkg="hsr_audio_pipeline"
+        type="gpsr_smach_node.py"
+        name="gpsr_smach_node"
+        output="screen">
+    <param name="intent_topic" value="/gpsr/intent" />
+  </node>
+</launch>
