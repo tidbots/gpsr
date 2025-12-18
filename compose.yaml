@@ -1,0 +1,36 @@
+# compose.yaml
+version: "3.9"
+
+services:
+  noetic-audio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: noetic-audio
+
+    # ROS1 なので host ネットワークが楽
+    network_mode: "host"
+
+    # 端末をそのまま使えるように
+    stdin_open: true
+    tty: true
+
+    # オーディオデバイスをコンテナに渡す
+    devices:
+      - "/dev/snd:/dev/snd"
+
+    # PulseAudio ソケット・設定を共有（ホスト側ユーザID=1000想定）
+    environment:
+      # ホスト側で `export PULSE_SERVER=unix:/run/user/1000/pulse/native` など
+      - PULSE_SERVER=${PULSE_SERVER}
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      # PulseAudio の runtime ソケット
+      - /run/user/1000/pulse:/run/user/1000/pulse
+      # Pulse 設定（必須ではないがあると安定）
+      - ~/.config/pulse:/home/roboworks/.config/pulse
+      # 将来 GUI ツールを使うなら X11 も共有しておくと便利
+      - /tmp/.X11-unix:/tmp/.X11-unix
+
+    # 必要ならホスト側 UID/GID を合わせて動かすことも可能
+    # user: "1000:1000"
