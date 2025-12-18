@@ -233,17 +233,24 @@ rostopic echo /gpsr/intent
 docker compose exec noetic-audio bash
 rostopic echo /asr/text
 ```
+文字化けしない
+```
 rosrun hsr_audio_pipeline asr_plain_echo.py
+```
+```
+rosrun hsr_audio_pipeline gpsr__echo.py
+```
 
-「テーブルの上のペットボトルを持ってきて」
 
-と 2〜3 秒くらい話して、少し黙る、を数回やると、
+「テーブルの上のペットボトルを持ってきて」 と発話すると、
 
-/asr/text に文字起こしされた日本語文
+/asr/text に文字起こしされた日本語文が
 
 /gpsr/intent に JSON 例：
-
+```
 {"raw_text": "テーブルの上のペットボトルを持ってきて", 
  "intent_type": "bring",
  "slots": {"object": "テーブルの上のペットボトル", "source": "", "destination": "", "person": ""}}
+```
+
 
