@@ -114,8 +114,15 @@ class FasterWhisperASRNode(object):
         self.segment_samples = 0
 
     def finalize_segment(self):
+        rospy.loginfo(
+            "FasterWhisperASRNode: finalize_segment called (segment_samples=%d)",
+            self.segment_samples
+        )
+
         if not self.segment_buffer or self.segment_samples == 0:
+            rospy.loginfo("FasterWhisperASRNode: no data in buffer, skip")
             return
+
 
         duration_sec = self.segment_samples / float(self.sample_rate)
         if duration_sec < self.min_segment_sec:
