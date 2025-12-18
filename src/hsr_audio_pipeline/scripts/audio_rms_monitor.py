@@ -8,7 +8,7 @@ from audio_common_msgs.msg import AudioData
 class AudioRMSMonitor(object):
     def __init__(self):
         # パラメータ
-        topic = rospy.get_param("~topic", "/audio")
+        topic = rospy.get_param("~topic", "/audio/audio")
         self.sample_format = rospy.get_param("~sample_format", "S16LE")
         self.log_interval = rospy.get_param("~log_interval", 10)  # 何フレームごとに出力するか
 
