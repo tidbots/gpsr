@@ -34,6 +34,8 @@ RUN pip3 install --no-cache-dir --upgrade pip \
  && pip3 install --no-cache-dir torch torchaudio
  RUN pip3 install --no-cache-dir --upgrade pip \
  && pip3 install --no-cache-dir torch torchaudio packaging
+RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir torch torchaudio packaging faster-whisper
  
 # === catkin workspace ===
 ENV CATKIN_WS=/hsr_ws
