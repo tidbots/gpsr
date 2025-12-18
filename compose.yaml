@@ -10,6 +10,10 @@ services:
     stdin_open: true
     tty: true
 
+    # まだであれば audio グループも追加
+    group_add:
+      - audio
+
     devices:
       - "/dev/snd:/dev/snd"
 
@@ -21,6 +25,7 @@ services:
       - /run/user/1000/pulse:/run/user/1000/pulse
       - ~/.config/pulse:/home/roboworks/.config/pulse
       - /tmp/.X11-unix:/tmp/.X11-unix
-
+      - /proc/asound:/proc/asound:ro
+  
       # 重要：src をホストの ~/src とマウント（編集反映用）
       - ./src:/hsr_ws/src:rw
