@@ -1,0 +1,25 @@
+<launch>
+  <!-- audio_capture -->
+  <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
+    <param name="sample_rate" value="16000" />
+    <param name="channels" value="1" />
+    <param name="format" value="wave" />
+    <param name="sample_format" value="S16LE" />
+    <param name="device" value="" />
+  </node>
+
+  <!-- RMSモニタ（デバッグ用・任意） -->
+  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
+    <param name="topic" value="/audio/audio" />
+    <param name="sample_format" value="S16LE" />
+    <param name="log_interval" value="20" />
+  </node>
+
+  <!-- Silero VAD ノード -->
+  <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad_node" output="screen">
+    <param name="audio_topic" value="/audio/audio" />
+    <param name="sample_rate" value="16000" />
+    <param name="speech_threshold" value="0.5" />
+    <param name="log_interval" value="20" />
+  </node>
+</launch>
