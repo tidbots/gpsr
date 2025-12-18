@@ -30,6 +30,9 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --no-cache-dir --upgrade pip
 
+RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir torch torchaudio
+ 
 # === catkin workspace ===
 ENV CATKIN_WS=/hsr_ws
 RUN mkdir -p ${CATKIN_WS}/src
