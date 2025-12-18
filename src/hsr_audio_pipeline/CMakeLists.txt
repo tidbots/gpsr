@@ -20,6 +20,7 @@ catkin_install_python(
   PROGRAMS
     scripts/audio_rms_monitor.py
     scripts/silero_vad_node.py
+    scripts/faster_whisper_asr_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
