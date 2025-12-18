@@ -24,6 +24,7 @@ catkin_install_python(
     scripts/faster_whisper_asr_simple_node.py
     scripts/gpsr_intent_node.py
     scripts/asr_plain_echo.py
+    scripts/gpsr_smach_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
