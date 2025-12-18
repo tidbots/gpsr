@@ -27,7 +27,17 @@ RUN apt-get update && apt-get install -y \
     pulseaudio \
     pulseaudio-utils \
     libasound2-dev \
+      ffmpeg \
+    pkg-config \
+    libavcodec-dev \
+    libavformat-dev \
+    libavdevice-dev \
+    libavutil-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
  && rm -rf /var/lib/apt/lists/*
+
 
 # PyTorch & faster-whisper (CPU版, Python 3.8 対応)
 RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
