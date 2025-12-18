@@ -29,12 +29,18 @@ RUN apt-get update && apt-get install -y \
     libasound2-dev \
  && rm -rf /var/lib/apt/lists/*
 
-
+# PyTorch & faster-whisper (CPU版)
 RUN pip3 install --no-cache-dir --upgrade pip \
- && pip3 install --no-cache-dir torch torchaudio packaging
-RUN pip3 install --no-cache-dir --upgrade pip \
- && pip3 install --no-cache-dir "tokenizers<0.21" \
- && pip3 install --no-cache-dir "faster-whisper<1.1.0"
+ && pip3 install --no-cache-dir \
+      'torch==2.4.1+cpu' \
+      --index-url https://download.pytorch.org/whl/cpu \
+ && pip3 install --no-cache-dir packaging faster-whisper
+ 
+#RUN pip3 install --no-cache-dir --upgrade pip \
+# && pip3 install --no-cache-dir torch torchaudio packaging
+#RUN pip3 install --no-cache-dir --upgrade pip \
+# && pip3 install --no-cache-dir "tokenizers<0.21" \
+# && pip3 install --no-cache-dir "faster-whisper<1.1.0"
  
 # === catkin workspace ===
 ENV CATKIN_WS=/hsr_ws
