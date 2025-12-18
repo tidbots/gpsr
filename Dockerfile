@@ -17,6 +17,7 @@ RUN groupadd -g ${GID} ${GROUP_NAME} \
 # === 必要パッケージ ===
 RUN apt-get update && apt-get install -y \
     ros-noetic-audio-common \
+    ros-noetic-smach ros-noetic-smach-ros \
     build-essential \
     ros-noetic-catkin \
     git \
