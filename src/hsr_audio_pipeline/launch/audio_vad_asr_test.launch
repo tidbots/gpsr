@@ -1,0 +1,39 @@
+<launch>
+  <!-- audio_capture -->
+  <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
+    <param name="sample_rate" value="16000" />
+    <param name="channels" value="1" />
+    <param name="format" value="wave" />
+    <param name="sample_format" value="S16LE" />
+    <param name="device" value="" />
+  </node>
+
+  <!-- RMS monitor（任意） -->
+  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
+    <param name="topic" value="/audio/audio" />
+    <param name="sample_format" value="S16LE" />
+    <param name="log_interval" value="50" />
+  </node>
+
+  <!-- Silero VAD -->
+  <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad_node" output="screen">
+    <param name="audio_topic" value="/audio/audio" />
+    <param name="sample_rate" value="16000" />
+    <param name="speech_threshold" value="0.5" />
+    <param name="log_interval" value="50" />
+    <!-- min_samples は 512 デフォルトのままでOK -->
+  </node>
+
+  <!-- faster-whisper ASR -->
+  <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py" name="faster_whisper_asr_node" output="screen">
+    <param name="audio_topic" value="/audio/audio" />
+    <param name="vad_topic" value="/vad/is_speech" />
+    <param name="sample_rate" value="16000" />
+    <param name="min_segment_sec" value="0.3" />
+    <param name="max_segment_sec" value="10.0" />
+    <param name="model_size" value="small" />
+    <param name="device" value="cpu" />
+    <param name="compute_type" value="float32" />
+    <param name="language" value="ja" />
+  </node>
+</launch>
