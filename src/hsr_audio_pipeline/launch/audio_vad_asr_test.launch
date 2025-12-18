@@ -30,7 +30,7 @@
     <param name="sample_rate" value="16000" />
     <param name="min_segment_sec" value="0.2" />   <!-- 0.3 → 0.2 -->
     <param name="max_segment_sec" value="5.0" />   <!-- 10 → 5 秒 -->
-    <param name="model_size" value="small" />
+    <param name="model_size" value="tiny" />
     <param name="device" value="cpu" />
     <param name="compute_type" value="float32" />
     <param name="language" value="ja" />
