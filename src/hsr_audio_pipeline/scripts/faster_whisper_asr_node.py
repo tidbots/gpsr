@@ -94,7 +94,16 @@ class FasterWhisperASRNode(object):
                 rospy.loginfo("FasterWhisperASRNode: VAD off, finalize segment")
                 self.finalize_segment()
                 self.reset_segment()
+                
+        # ★ デバッグ用ログ（50フレームごとに状態を表示）
+        if self.frame_count % 50 == 0:
+            rospy.loginfo(
+                "ASR audio_callback: vad=%s prev_vad=%s segment_samples=%d",
+                self.current_vad, self.prev_vad, self.segment_samples
+            )
 
+
+        
         # prev_vad 更新
         self.prev_vad = self.current_vad
 
