@@ -17,6 +17,8 @@
 
   <!-- Pythonライブラリ用（RMS計算でnumpy使用） -->
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>smach</exec_depend>
+  <exec_depend>smach_ros</exec_depend>
 
   <export>
   </export>
