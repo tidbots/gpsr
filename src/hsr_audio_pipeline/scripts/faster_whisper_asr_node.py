@@ -5,7 +5,7 @@ import rospy
 import numpy as np
 from std_msgs.msg import String, Bool, Float32
 from audio_common_msgs.msg import AudioData
-from faster_whisper import Whisper
+from faster_whisper import WhisperModel   # ★ Whisper -> WhisperModel
 
 
 class FasterWhisperASRNode(object):
@@ -15,15 +15,14 @@ class FasterWhisperASRNode(object):
         vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
 
         self.sample_rate = rospy.get_param("~sample_rate", 16000)
-        # 1 発話の最短/最長 長さ [sec]
         self.min_segment_sec = rospy.get_param("~min_segment_sec", 0.3)
         self.max_segment_sec = rospy.get_param("~max_segment_sec", 10.0)
 
-        model_size = rospy.get_param("~model_size", "small")   # "tiny", "base", "small", ...
-        device = rospy.get_param("~device", "cpu")             # 後で "cuda" に差し替え可
+        model_size = rospy.get_param("~model_size", "small")   # tiny, base, small, ...
+        device = rospy.get_param("~device", "cpu")
         compute_type = rospy.get_param("~compute_type", "float32")
 
-        self.language = rospy.get_param("~language", "ja")     # 日本語想定
+        self.language = rospy.get_param("~language", "ja")
 
         self.frame_count = 0
         self.current_vad = False
@@ -35,7 +34,11 @@ class FasterWhisperASRNode(object):
 
         rospy.loginfo("FasterWhisperASRNode: loading model '%s' on %s (%s)",
                       model_size, device, compute_type)
-        self.model = Whisper(model_size, device=device, compute_type=compute_type)
+        self.model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+        )
         rospy.loginfo("FasterWhisperASRNode: model loaded")
 
         # Publisher
@@ -52,9 +55,7 @@ class FasterWhisperASRNode(object):
     def vad_callback(self, msg: Bool):
         self.prev_vad = self.current_vad
         self.current_vad = msg.data
-
-        # True -> False への遷移は audio_callback 側で拾うので、
-        # ここでは状態更新だけ
+        # 実処理は audio_callback 側でやる
 
     def audio_callback(self, msg: AudioData):
         self.frame_count += 1
@@ -73,27 +74,26 @@ class FasterWhisperASRNode(object):
 
         audio_float = samples / 32768.0
         frame_len = samples.size
-        frame_sec = float(frame_len) / float(self.sample_rate)
 
         # --- VAD に応じてバッファリング ---
-        # 発話中フラグなら積む
         if self.current_vad:
+            # 話している間はひたすら貯める
             self.segment_buffer.append(audio_float)
             self.segment_samples += frame_len
 
-            # 長すぎる発話は途中で強制確定
+            # 長すぎる発話は強制確定
             if (self.segment_samples / float(self.sample_rate)) >= self.max_segment_sec:
                 rospy.loginfo("FasterWhisperASRNode: max_segment_sec reached, finalize segment")
                 self.finalize_segment()
                 self.reset_segment()
         else:
-            # current_vad == False のときに、直前まで話していたら確定
+            # いまは無音だけど、直前まで話していた場合 → 確定
             if self.prev_vad and self.segment_samples > 0:
                 rospy.loginfo("FasterWhisperASRNode: VAD off, finalize segment")
                 self.finalize_segment()
                 self.reset_segment()
 
-        # prev_vad を更新
+        # prev_vad 更新
         self.prev_vad = self.current_vad
 
     def reset_segment(self):
@@ -101,7 +101,6 @@ class FasterWhisperASRNode(object):
         self.segment_samples = 0
 
     def finalize_segment(self):
-        # バッファが空なら何もしない
         if not self.segment_buffer or self.segment_samples == 0:
             return
 
@@ -111,14 +110,12 @@ class FasterWhisperASRNode(object):
                           duration_sec)
             return
 
-        # まとめて 1 本の波形にする
         audio_np = np.concatenate(self.segment_buffer, axis=0)
 
         rospy.loginfo("FasterWhisperASRNode: transcribing segment (%.2f sec, %d samples)",
                       duration_sec, audio_np.size)
 
         try:
-            # faster-whisper で直接 numpy 配列を渡す
             segments, info = self.model.transcribe(
                 audio_np,
                 language=self.language,
@@ -130,41 +127,10 @@ class FasterWhisperASRNode(object):
 
         texts = []
         conf_scores = []
+
         try:
             for seg in segments:
                 if seg.text:
                     texts.append(seg.text)
-                # no_speech_prob があれば信頼度っぽく使う
                 if hasattr(seg, "no_speech_prob") and seg.no_speech_prob is not None:
-                    conf_scores.append(1.0 - float(seg.no_speech_prob))
-        except Exception as e:
-            rospy.logwarn("FasterWhisperASRNode: error iterating segments: %s", e)
-
-        if not texts:
-            rospy.loginfo("FasterWhisperASRNode: empty transcription result")
-            return
-
-        text = "".join(texts).strip()
-
-        if conf_scores:
-            conf = float(np.clip(np.mean(conf_scores), 0.0, 1.0))
-        else:
-            # セグメント情報がない場合は仮の値
-            conf = 0.0
-
-        rospy.loginfo("FasterWhisperASRNode: text='%s', confidence=%.3f", text, conf)
-
-        # Publish ROS topics
-        self.pub_text.publish(String(data=text))
-        self.pub_conf.publish(Float32(data=conf))
-
-
-def main():
-    rospy.init_node("faster_whisper_asr_node")
-    node = FasterWhisperASRNode()
-    rospy.loginfo("FasterWhisperASRNode started.")
-    rospy.spin()
-
-
-if __name__ == "__main__":
-    main()
+                    conf_scores.append(1.0 - float_
