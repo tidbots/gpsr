@@ -1,7 +1,10 @@
 # Dockerfile
 FROM ros:noetic-ros-base
 
-ARG DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=Asia/Tokyo
 
 # === ユーザ設定 ===
 ARG USER_NAME=roboworks
@@ -14,41 +17,72 @@ RUN groupadd -g ${GID} ${GROUP_NAME} \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} ${USER_NAME} \
  && echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# === 必要パッケージ ===
-RUN apt-get update && apt-get install -y \
-    ros-noetic-audio-common \
-    ros-noetic-smach ros-noetic-smach-ros \
-    build-essential \
-    ros-noetic-catkin \
-    git \
-    python3-pip \
-    python3-numpy \
-    alsa-utils \
-    pulseaudio \
-    pulseaudio-utils \
-    libasound2-dev \
-      ffmpeg \
-    pkg-config \
-    libavcodec-dev \
-    libavformat-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
- && rm -rf /var/lib/apt/lists/*
+# ===== OS パッケージ =====
+#  - audio_capture 用: audio-common
+#  - いずれ使う smach もここで入れておく
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3-pip python3-dev build-essential \
+        ros-noetic-audio-common \
+        ros-noetic-audio-common-msgs \
+        ros-noetic-smach \
+        ros-noetic-smach-ros && \
+    rm -rf /var/lib/apt/lists/*
 
-
-# PyTorch & faster-whisper (CPU版, Python 3.8 対応)
-RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
+# ===== Python 音声系ライブラリ =====
+# Python 3.8 なので、依存関係を「安全な範囲」に固定してインストール
+RUN pip3 install --no-cache-dir \
+        "typing-extensions<4.9" \
+        "packaging<24" && \
+    pip3 install --no-cache-dir \
+        "ctranslate2==4.4.0" \
+        "tokenizers==0.19.1" \
+        "huggingface-hub==0.22.2" && \
     pip3 install --no-cache-dir \
         "torch==2.4.1+cpu" \
         --index-url https://download.pytorch.org/whl/cpu && \
-    pip3 install --no-cache-dir \
-        "faster-whisper==0.10.1" \
-        "ctranslate2<4.5" \
-        "tokenizers<0.20" \
-        "huggingface-hub<0.23"
+    # ★ ここがポイント: 依存関係を入れずに faster-whisper のみ導入（av を引っ張らない）
+    pip3 install --no-cache-dir --no-deps \
+        "faster-whisper==0.10.1"
+
+
+
+
+# === 必要パッケージ ===
+#RUN apt-get update && apt-get install -y \
+#   ros-noetic-audio-common \
+#   ros-noetic-smach ros-noetic-smach-ros \
+#    build-essential \
+#    ros-noetic-catkin \
+#    git \
+#    python3-pip \
+#    python3-numpy \
+#    alsa-utils \
+#    pulseaudio \
+#    pulseaudio-utils \
+#    libasound2-dev \
+#      ffmpeg \
+#    pkg-config \
+#    libavcodec-dev \
+#    libavformat-dev \
+#    libavdevice-dev \
+#    libavutil-dev \
+#    libavfilter-dev \
+#    libswscale-dev \
+#   libswresample-dev \
+# && rm -rf /var/lib/apt/lists/*
+
+
+# PyTorch & faster-whisper (CPU版, Python 3.8 対応)
+#RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
+#    pip3 install --no-cache-dir \
+#        "torch==2.4.1+cpu" \
+#        --index-url https://download.pytorch.org/whl/cpu && \
+#    pip3 install --no-cache-dir \
+#        "faster-whisper==0.10.1" \
+#       "ctranslate2<4.5" \
+#        "tokenizers<0.20" \
+#        "huggingface-hub<0.23"
  
 #RUN pip3 install --no-cache-dir --upgrade pip \
 # && pip3 install --no-cache-dir torch torchaudio packaging
