@@ -29,21 +29,36 @@ RUN apt-get update && \
         ros-noetic-smach-ros && \
     rm -rf /var/lib/apt/lists/*
 
-# ===== Python 音声系ライブラリ =====
-# Python 3.8 なので、依存関係を「安全な範囲」に固定してインストール
-    # PyTorch & faster-whisper (CPU版, Python 3.8 対応)
-    RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
-        pip3 install --no-cache-dir \
-            "torch==2.4.1+cpu" \
-            --index-url https://download.pytorch.org/whl/cpu && \
-        pip3 install --no-cache-dir "av<10" && \
-        pip3 install --no-cache-dir \
-            "ctranslate2<4.5" \
-            "tokenizers<0.20" \
-            "huggingface-hub<0.23" && \
-        pip3 install --no-cache-dir \
-            "faster-whisper==0.10.1" --no-deps
-
+# ---- system deps ----
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y \
+        ffmpeg \
+        pkg-config \
+        libavformat-dev \
+        libavcodec-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libavfilter-dev \
+        libswscale-dev \
+        libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+    
+# ---- Python deps: torch + faster-whisper (Python 3.8 対応構成) ----
+RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
+    pip3 install --no-cache-dir \
+        "torch==2.4.1+cpu" \
+        --index-url https://download.pytorch.org/whl/cpu && \
+    # PyAV をビルドするために Cython を旧バージョンに固定
+    pip3 install --no-cache-dir "cython<3" && \
+    # faster-whisper 0.10.1 が要求する av==10.* を明示的に入れる
+    pip3 install --no-cache-dir "av==10.0.0" && \
+    # ctranslate2 / tokenizers / huggingface-hub はバージョンを絞る
+    pip3 install --no-cache-dir \
+        "ctranslate2<4.5" \
+        "tokenizers<0.20" \
+        "huggingface-hub<0.23" && \
+    # 最後に faster-whisper 本体（依存関係はすでに入っているので --no-deps）
+    pip3 install --no-cache-dir "faster-whisper==0.10.1" --no-deps
 
 
 
