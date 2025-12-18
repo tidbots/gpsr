@@ -5,6 +5,8 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
   audio_common_msgs
+  smach
+  smach_ros
 )
 
 catkin_package(
