@@ -20,6 +20,7 @@
 
 ## 2. 全体アーキテクチャ図
 
+
 ```mermaid
 flowchart LR
     Mic[Microphone]
@@ -28,19 +29,19 @@ flowchart LR
     ASR[faster_whisper_asr_node]
     PARSER[gpsr_parser_node]
     SMACH[gpsr_smach_node]
-    NAV[move_base / HSR skills]
+    NAV["move_base / HSR skills"]
 
     Mic --> AC
-    AC -->|/audio/audio| VAD
-    VAD -->|/vad/is_speech| ASR
-    AC -->|/audio/audio| ASR
+    AC -->|"/audio/audio"| VAD
+    VAD -->|"/vad/is_speech"| ASR
+    AC -->|"/audio/audio"| ASR
 
-    ASR -->|/gpsr/asr/raw_text| PARSER
-    ASR -->|/gpsr/asr/text| PARSER
-    ASR -->|/gpsr/asr/confidence| PARSER
-    ASR -->|/gpsr/asr/utterance_end| PARSER
+    ASR -->|"/gpsr/asr/raw_text"| PARSER
+    ASR -->|"/gpsr/asr/text"| PARSER
+    ASR -->|"/gpsr/asr/confidence"| PARSER
+    ASR -->|"/gpsr/asr/utterance_end"| PARSER
 
-    PARSER -->|/gpsr/intent (gpsr_intent_v1)| SMACH
+    PARSER -->|"/gpsr/intent (gpsr_intent_v1)"| SMACH
     SMACH --> NAV
 ```
 ---
