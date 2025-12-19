@@ -8,7 +8,7 @@ abilities.
 Task planning, object/people detection and recognition, object feature recognition, object manipulation
 
 ## Setup
-1. First list item
+- First list item
    - First nested list item
      - Second nested list item
      - 
