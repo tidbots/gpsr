@@ -272,6 +272,21 @@ rosrun hsr_audio_pipeline gpsr__echo.py
 ```
 
 
+# デバッグ
+```
+docker compose exec noetic-audio bash
+source /hsr_ws/devel/setup.bash
+rosrun hsr_audio_pipeline gpsr_parser_node.py
+```
+```
+rostopic pub /asr/text std_msgs/String \
+"data: 'Find a sponge in the living room then get it and bring it to me'" -1
+
+rostopic echo /gpsr/intent
+```
+
+
+
 「テーブルの上のペットボトルを持ってきて」 と発話すると、
 
 /asr/text に文字起こしされた日本語文が
