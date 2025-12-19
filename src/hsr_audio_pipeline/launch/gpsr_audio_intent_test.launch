@@ -1,5 +1,7 @@
 <launch>
-  <!-- audio_capture -->
+  <!-- =======================
+       audio_capture
+       ======================= -->
   <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
     <param name="sample_rate" value="16000" />
     <param name="channels" value="1" />
@@ -15,37 +17,80 @@
     <param name="log_interval" value="50" />
   </node>
 
-
-  <!-- Silero VAD ノード -->
+  <!-- =======================
+       Silero VAD
+       ======================= -->
   <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad" output="screen">
     <param name="audio_topic" value="/audio/audio" />
     <param name="vad_topic"   value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
-    <!-- 必要ならしきい値をチューニング -->
+    <!-- 必要ならチューニング -->
     <param name="speech_threshold"  value="0.6" />
     <param name="silence_threshold" value="0.3" />
     <param name="hangover_ms"       value="400" />
   </node>
 
-  <!-- Faster-Whisper ASR ノード -->
-  <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_simple_node.py"
-        name="faster_whisper_asr_simple_node" output="screen">
+  <!-- =======================
+       Faster-Whisper ASR (Step 1: VAD-driven, GPSR outputs)
+       ======================= -->
+  <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py"
+        name="faster_whisper_asr_node" output="screen">
     <param name="audio_topic" value="/audio/audio" />
+    <param name="vad_topic"   value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
-    <param name="segment_sec" value="8.0" />
-    <param name="model_size" value="tiny" />
-    <param name="device" value="cpu" />
-    <param name="compute_type" value="float32" />
+
+    <!-- GPSR ASR outputs -->
+    <param name="raw_text_topic"       value="/gpsr/asr/raw_text" />
+    <param name="text_topic"           value="/gpsr/asr/text" />
+    <param name="confidence_topic"     value="/gpsr/asr/confidence" />
+    <param name="utterance_end_topic"  value="/gpsr/asr/utterance_end" />
+
+    <!-- Model -->
+    <param name="model_size" value="small" />
+    <param name="device" value="cpu" />           <!-- GPUなら cuda -->
+    <param name="compute_type" value="float32" /> <!-- GPUなら float16 推奨 -->
     <param name="language" value="en" />
+
+    <!-- Segmentation -->
+    <param name="pre_roll_sec" value="0.25" />
+    <param name="post_roll_sec" value="0.35" />
+    <param name="min_segment_sec" value="0.6" />
+    <param name="max_segment_sec" value="18.0" />
+
+    <param name="enable_corrections" value="true" />
   </node>
 
- <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py" name="gpsr_parser_node" output="screen" />
+  <!-- =======================
+       GPSR Parser (Step 2 + 2.5: utterance_end-driven, unified schema)
+       ======================= -->
+  <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py"
+        name="gpsr_parser_node" output="screen">
+    <param name="text_topic"          value="/gpsr/asr/text" />
+    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
+    <param name="confidence_topic"    value="/gpsr/asr/confidence" />
 
-
-  <!-- GPSR Intent ノード -->
-  <node pkg="hsr_audio_pipeline" type="gpsr_intent_node.py"
-        name="gpsr_intent_node" output="screen">
-    <param name="asr_topic" value="/asr/text" />
+    <!-- Unified intent output -->
     <param name="intent_topic" value="/gpsr/intent" />
+
+    <!-- jitter吸収 -->
+    <param name="max_text_age_sec" value="1.0" />
+
+    <!-- confidence gate: 無効化は -1 -->
+    <param name="min_confidence" value="-1.0" />
   </node>
+
+  <!-- =======================
+       (Optional) Backup intent extractor
+       出力は /gpsr/intent_alt にして衝突回避
+       ======================= -->
+  <arg name="start_intent_backup" default="false" />
+  <group if="$(arg start_intent_backup)">
+    <node pkg="hsr_audio_pipeline" type="gpsr_intent_node.py"
+          name="gpsr_intent_node_backup" output="screen">
+      <param name="text_topic" value="/gpsr/asr/text" />
+      <param name="confidence_topic" value="/gpsr/asr/confidence" />
+      <param name="intent_topic" value="/gpsr/intent_alt" />
+      <param name="confirm_threshold" value="-1.0" />
+    </node>
+  </group>
 </launch>
