@@ -3,29 +3,10 @@
 
 
 ## ToDo
-initial_prompt に入れておくと良い単語の微調整
+**initial_prompt に入れておくと良い単語の微調整**
 
+**誤認識ログの収集と登録**
 
-
-##　CommandGeneratorで命令文を作る
-[CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
-
-命令のサンプル
-```
-Tell me how many people in the bathroom are wearing white sweaters
-Tell the gesture of the person at the bedside table to the person at the dishwasher
-Tell me what is the biggest cleaning supply on the shelf Bring me a spam from the bed
-Tell me how many people in the kitchen are wearing white shirts
-Navigate to the desk lamp then look for a tuna and grasp it and give it to the lying person in the bathroom
-Tell the name of the person at the entrance to the person at the sofa
-Fetch a food from the sofa and deliver it to me
-Tell me how many drinks there are on the dishwasher
-Tell me what is the lightest cleaning supply on the sofa
-Tell me how many lying persons are in the bathroom
-Tell me how many food there are on the sink
-...
-...
-```
 
 ## インストールとDockerコンテナの実行
 ```
@@ -45,7 +26,8 @@ docker compose exec noetic-audio bash
 roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
 ```
 
-別のターミナルから、認識した文字列を表示
+## 認識した文字列を表示
+別のターミナルから
 ```
 cd ~/gpsr
 export PULSE_SERVER=unix:/run/user/1000/pulse/native
@@ -57,7 +39,8 @@ rostopic echo /asr/text
 rosrun hsr_audio_pipeline asr_plain_echo.py
 ```
 
-別のターミナルから、コマンドを解析した文字列を表示
+## コマンドを解析した文字列を表示
+別のターミナルから
 ```
 cd ~/gpsr
 export PULSE_SERVER=unix:/run/user/1000/pulse/native
@@ -70,7 +53,26 @@ rosrun hsr_audio_pipeline gpsr__echo.py
 ```
 
 
+## マイクに向かって発話する
+命令文はCommandGeneratorで作る<br>
+[CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
+命令のサンプル
+```
+Tell me how many people in the bathroom are wearing white sweaters
+Tell the gesture of the person at the bedside table to the person at the dishwasher
+Tell me what is the biggest cleaning supply on the shelf Bring me a spam from the bed
+Tell me how many people in the kitchen are wearing white shirts
+Navigate to the desk lamp then look for a tuna and grasp it and give it to the lying person in the bathroom
+Tell the name of the person at the entrance to the person at the sofa
+Fetch a food from the sofa and deliver it to me
+Tell me how many drinks there are on the dishwasher
+Tell me what is the lightest cleaning supply on the sofa
+Tell me how many lying persons are in the bathroom
+Tell me how many food there are on the sink
+...
+...
+```
 
 
 
