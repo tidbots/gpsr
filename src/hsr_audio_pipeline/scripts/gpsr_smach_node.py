@@ -72,7 +72,7 @@ class PlanTask(smach.State):
         smach.State.__init__(
             self,
             outcomes=['planned', 'unsupported'],
-            input_keys=['intent_dict'],
+            input_keys=['intent_dict', 'error_msg'], 
             output_keys=['task_description', 'error_msg']
         )
         self.task_state_pub = task_state_pub
