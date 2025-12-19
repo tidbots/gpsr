@@ -24,7 +24,7 @@
     <param name="model_size" value="tiny" />
     <param name="device" value="cpu" />
     <param name="compute_type" value="float32" />
-    <param name="language" value="ja" />
+    <param name="language" value="en" />
   </node>
 
   <!-- GPSR Intent ノード -->
