@@ -15,7 +15,19 @@
     <param name="log_interval" value="50" />
   </node>
 
-  <!-- シンプル ASR -->
+
+  <!-- Silero VAD ノード -->
+  <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad" output="screen">
+    <param name="audio_topic" value="/audio/audio" />
+    <param name="vad_topic"   value="/vad/is_speech" />
+    <param name="sample_rate" value="16000" />
+    <!-- 必要ならしきい値をチューニング -->
+    <param name="speech_threshold"  value="0.6" />
+    <param name="silence_threshold" value="0.3" />
+    <param name="hangover_ms"       value="400" />
+  </node>
+
+  <!-- Faster-Whisper ASR ノード -->
   <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_simple_node.py"
         name="faster_whisper_asr_simple_node" output="screen">
     <param name="audio_topic" value="/audio/audio" />
