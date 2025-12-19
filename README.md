@@ -15,6 +15,20 @@ source devel/setup.bash
 roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 ```
 
+発話サンプル
+```
+Tell me how many people in the bathroom are wearing white sweaters
+Tell the gesture of the person at the bedside table to the person at the dishwasher
+Tell me what is the biggest cleaning supply on the shelf Bring me a spam from the bed
+Tell me how many people in the kitchen are wearing white shirts
+Navigate to the desk lamp then look for a tuna and grasp it and give it to the lying person in the bathroom
+Tell the name of the person at the entrance to the person at the sofa
+Fetch a food from the sofa and deliver it to me
+Tell me how many drinks there are on the dishwasher
+Tell me what is the lightest cleaning supply on the sofa
+Tell me how many lying persons are in the bathroom
+Tell me how many food there are on the sink
+```
 
 ## 1. ROS パッケージ構成（例）
 ```
