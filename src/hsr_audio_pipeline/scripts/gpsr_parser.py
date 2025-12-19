@@ -58,29 +58,34 @@ def split_into_clauses(text: str) -> List[str]:
     return clauses
 
 
-def best_match(token, candidates):
+def best_match(token: str, candidates: List[str]) -> Optional[str]:
     """
-    候補リストから最適な語を返す。
+    ASR ノイズを多少含んでいても、候補リストの中から最も近いものを返す。
+
+    改善点（重要）:
+    - 候補順に依存しない（"bed" が先にあっても "bedside table" を取れる）
     - 完全一致 > 前後方一致 > 部分一致
     - 同点の場合は「最長一致」を優先
     """
+    token = token.strip().lower()
     if not token:
         return None
 
-    token = token.strip().lower()
-
     # 1) 完全一致（最優先）
-    exact = [c for c in candidates if token == c.lower()]
+    exact = [c for c in candidates if token == c.strip().lower()]
     if exact:
-        return max(exact, key=len)
+        return max(exact, key=lambda s: len(s.strip()))
 
-    scored = []
+    scored = []  # (score, length, candidate)
     for c in candidates:
-        cl = c.lower().strip()
+        cl = c.strip().lower()
+        if not cl:
+            continue
+
         score = -1
 
-        # 2) 前方・後方一致（強い）
-        if token.startswith(cl) or cl.startswith(token):
+        # 2) 前方/後方一致（強い）
+        if token.startswith(cl) or cl.startswith(token) or token.endswith(cl) or cl.endswith(token):
             score = 80
 
         # 3) 部分一致（弱い）
@@ -88,16 +93,14 @@ def best_match(token, candidates):
             score = max(score, 60)
 
         if score >= 0:
-            # (score, length, value)
             scored.append((score, len(cl), c))
 
     if not scored:
         return None
 
-    # スコア最大、同点なら文字列が長いもの（＝最長一致）
+    # score 最大、同点なら length 最大（= 最長一致）を採用
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return scored[0][2]
-
 
 
 # ================= 内部表現 =================
