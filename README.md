@@ -342,6 +342,151 @@ rosrun hsr_audio_pipeline gpsr__echo.py
 ```
 
 
+# 誤認識ログから correction 辞書を自動生成するツール
+## 入力
+```
+1. /asr/text ログ
+または
+ASR出力ログファイル（例：asr.log）
+
+2. GPSR 正解語彙リスト（names, locations, objects, categories）
+
+## 出力
+以下のような辞書：
+```
+{
+  "livingroom": "living room",
+  "livin room": "living room",
+  "bath room": "bathroom",
+  "corn flakes": "cornflakes",
+}
+```
+## How?
+1. ASRログから単語頻度を抽出
+例：
+```
+tell me how many persons raising their right arm are in the livin room
+```
+→ 分割して
+- livin
+- room
+- livingroom
+- etc.
+
+2.語彙リストと距離計算
+例えば：
+- Levenshtein距離
+- Jaro-Winkler
+- Token-based fuzzy matching
+を用いると、
+```
+"livin room" → "living room"   (距離極小)
+"bath room"  → "bathroom"      (距離極小)
+```
+を自動推定できます。
+
+3. 閾値ルール
+- 距離 < 2 なら補正候補
+- 距離 < 4 なら人工判断必要
+
+## ツール
+```
+from fuzzywuzzy import fuzz
+from collections import Counter
+
+def extract_errors(log_file, gpsr_vocab, threshold=80):
+    counter = Counter()
+    for line in open(log_file):
+        for word in tokenize(line):
+            if word.lower() not in gpsr_vocab:
+                counter[word] += 1
+
+    corrections = {}
+
+    for wrong, _ in counter.most_common():
+        best = None
+        best_score = 0
+        for correct in gpsr_vocab:
+            score = fuzz.ratio(wrong, correct)
+            if score > best_score:
+                best = correct
+                best_score = score
+
+        if best_score >= threshold:
+            corrections[wrong] = best
+
+    return corrections
+```
+出力例：
+```
+{
+ "livin room": "living room",
+ "book shelve": "bookshelf",
+ "corn flakes": "cornflakes",
+}
+```
+これをそのまま：
+```
+apply_gpsr_corrections()
+```
+に追加すればOK。
+
+## 運用方法
+### Step 1 — ログ収集
+```
+rostopic echo /asr/text > asr.log
+```
+
+大会前になれば1–2時間で1万行ぐらい集まる。
+
+### Step 2 — ツール実行
+```
+python gen_corrections.py asr.log
+```
+→ correction 辞書候補生成
+
+### Step 3 — 人間が確認
+- 明らかに誤り
+- false positive でないか
+
+### Step 4 — 修正辞書追加 & 再学習
+
+## なぜ “自動生成”が重要か
+- 長期運用時
+  - 環境ノイズ差
+  - 話者アクセント
+  - マイク違い
+→ 誤認識傾向が変わる
+
+- ロボカップ現場
+  - 英語アクセント多様
+  - 語彙が限定的
+→ correction辞書が強い
+
+- 人手で気づけない誤りも拾える
+
+つまり、
+- 耳を鍛えるのではなく
+- 誤識を吸収する辞書を鍛える
+というアプローチ。
+
+## 拡張案
+- 自動教師あり学習との組合せ
+  - wrong → correct の統計が蓄積されると
+  - correction辞書が自動強化
+
+- 特定話者モデル
+  - 話者特徴に応じた correction 優先順位調整
+
+## 実装
+誤認識ログから correction 辞書を自動生成するツール一式
+- gpsr_vocab.py … GPSR の語彙をひとまとめにしたモジュール
+- gen_corrections.py … ASRログから correction 候補を自動生成するツール本体
+- （おまけ）apply_corrections_example.py … 生成した辞書をどう使うかのサンプル
+全部スタンドアロンな Python スクリプトで、ROS に依存しないので，Docker コンテナの中でそのまま動かせる
+
+
+
 # デバッグ
 ```
 docker compose exec noetic-audio bash
