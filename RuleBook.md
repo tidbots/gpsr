@@ -13,11 +13,14 @@ Task planning, object/people detection and recognition, object feature recogniti
      - Second nested list item
      - 
 - Locations:
-   – Task location: The task takes place inside the Arena. Commands may require the
+  – Task location: The task takes place inside the Arena. Commands may require the
 robot to leave the room. The Arena is in its nominal configuration for this task.
-
-– Start location: The robot starts outside the Arena. When the door opens, it must
+  – Start location: The robot starts outside the Arena. When the door opens, it must
 navigate towards the Instruction Point.
+
+
+
+
 
 – Instruction point: The robot returns to this point after completing all the commands.
 • People:
