@@ -6,7 +6,14 @@
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
 
-
+シンプル ASR 動作確認
+VADをスキップ
+コンテナ内で：
+```
+cd /hsr_ws
+source devel/setup.bash
+roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
+```
 
 
 ## 1. ROS パッケージ構成（例）
