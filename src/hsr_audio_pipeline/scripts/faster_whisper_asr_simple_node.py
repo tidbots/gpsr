@@ -16,7 +16,7 @@ class FasterWhisperASRSimpleNode(object):
         model_size = rospy.get_param("~model_size", "small")
         device = rospy.get_param("~device", "cpu")
         compute_type = rospy.get_param("~compute_type", "float32")
-        self.language = rospy.get_param("~language", "ja")
+        self.language = rospy.get_param("~language", "en")
 
         self.segment_samples_target = int(self.sample_rate * self.segment_sec)
         self.buffer = np.zeros(0, dtype=np.float32)
