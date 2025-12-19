@@ -503,7 +503,133 @@ python3 gen_corrections.py asr.log > corrections_candidates.py
 4. faster_whisper_asr_node.py の apply_gpsr_corrections() に統合
 5. 再度ログを取りながら、定期的に 1〜4 を回す
 
+ゴールのイメージ
 
+faster_whisper_asr_node.py には現在こういう関数があります：
+
+def apply_gpsr_corrections(self, text: str) -> str:
+    corrections = {
+        "livingroom": "living room",
+        "livin room": "living room",
+        "bath room": "bathroom",
+        ...
+    }
+
+    fixed = text
+    for wrong, right in corrections.items():
+        fixed = fixed.replace(wrong, right)
+        fixed = fixed.replace(wrong.capitalize(), right)
+    return fixed
+
+
+💡 ここに、人間が書いた correction 辞書ではなく、
+自動生成ツールで作った辞書を取り込む
+というのが「統合」です。
+
+🔧 STEP 1 — 自動生成ツールで correction 候補を作る
+
+例えば：
+
+python gen_corrections.py asr.log > corrections_candidates.py
+
+
+この corrections_candidates.py はこういう内容になります：
+
+# corrections_candidates.py
+CORRECTIONS = {
+    "livin room": "living room",  # score=92.3, count=7
+    "livingroom": "living room",  # score=90.1, count=3
+    "corn flakes": "cornflakes",  # score=88.1, count=4
+}
+
+🔧 STEP 2 — faster_whisper_asr_node.py に取り込む
+2-1. ファイルを import する
+
+faster_whisper_asr_node.py の上部に：
+
+from corrections_candidates import CORRECTIONS
+
+
+と1行追加します。
+
+faster_whisper_asr_node.py
+corrections_candidates.py
+gpsr_vocab.py
+
+
+が同じフォルダにある必要があります。
+
+2-2. apply_gpsr_corrections() をこう変える
+before
+def apply_gpsr_corrections(self, text: str) -> str:
+    corrections = {
+        "livingroom": "living room",
+        "livin room": "living room",
+        "bath room": "bathroom",
+        ...
+    }
+
+    fixed = text
+    for wrong, right in corrections.items():
+        fixed = fixed.replace(wrong, right)
+    return fixed
+
+after（統合版）
+from corrections_candidates import CORRECTIONS  # 自動生成辞書を import
+
+def apply_gpsr_corrections(self, text: str) -> str:
+    fixed = text
+
+    # 自動生成辞書を適用
+    for wrong, right in CORRECTIONS.items():
+        fixed = fixed.replace(wrong, right)
+        fixed = fixed.replace(wrong.capitalize(), right.capitalize())
+
+    return fixed
+
+
+つまり：
+
+前は：手書きの小さな辞書
+
+今後は：gen_corrections.py が作る CORRECTIONS をそのまま利用
+
+になる、ということです。
+
+「apply_gpsr_corrections() に統合」とは
+→ apply_gpsr_corrections 関数は correction 辞書を参照するだけにし、
+correction辞書は外部ファイルから供給する
+
+という意味。
+
+
+運用のメリット
+👍 faster_whisper_asr_node.py を編集しなくていい
+
+誤認識辞書を育てるときは：
+
+asr.log を収集
+
+gen_corrections.py 実行
+
+corrections_candidates.py を差し替え
+
+するだけで済む。
+
+👍 correction 辞書が肥大しても整理しやすい
+
+apply_gpsr_corrections() 自体は変わらないので
+ロジックはシンプルなまま。
+
+👍 ロボカップ現場で高速チューニングできる
+
+会場ノイズ
+
+審判のアクセント
+
+マイク特性
+
+に応じて correction だけ更新できる。
 
 
 # デバッグ
