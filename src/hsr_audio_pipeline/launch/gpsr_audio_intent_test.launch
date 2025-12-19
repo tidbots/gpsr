@@ -20,7 +20,7 @@
         name="faster_whisper_asr_simple_node" output="screen">
     <param name="audio_topic" value="/audio/audio" />
     <param name="sample_rate" value="16000" />
-    <param name="segment_sec" value="2.0" />
+    <param name="segment_sec" value="8.0" />
     <param name="model_size" value="tiny" />
     <param name="device" value="cpu" />
     <param name="compute_type" value="float32" />
