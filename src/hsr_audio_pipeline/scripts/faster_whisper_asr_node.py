@@ -4,21 +4,19 @@
 """
 ROS1 (Noetic) Faster-Whisper ASR node with external VAD gating.
 
-- Subscribe:
-  - ~audio_topic (audio_common_msgs/AudioData)  default: /audio/audio
-  - ~vad_topic   (std_msgs/Bool)               default: /vad/is_speech
-- Publish:
-  - ~text_topic  (std_msgs/String)             default: /asr/text
+Sub:
+  - ~audio_topic (audio_common_msgs/AudioData) default: /audio/audio
+  - ~vad_topic   (std_msgs/Bool)              default: /vad/is_speech
+
+Pub:
+  - ~text_topic          (std_msgs/String)    default: /gpsr/asr/text
+  - ~utterance_end_topic (std_msgs/Bool)      default: /gpsr/asr/utterance_end   <-- NEW
 
 Behavior:
-  - When VAD becomes True: start accumulating audio into a segment
-  - While VAD True: keep buffering audio (and optionally post_roll)
-  - When VAD becomes False: wait post_roll seconds then finalize segment and transcribe
-  - Fix: hotwords param may be list/tuple or string; normalize to string for faster-whisper
-
-Notes:
-  - Assumes incoming AudioData is PCM bytes (commonly S16LE) with sample rate provided in ~sample_rate.
-  - If your audio_capture is not S16LE PCM, you must ensure it is (e.g., audio_capture dst=appsink, sample_format=S16LE).
+  - VAD True  -> start a new segment (with pre-roll)
+  - VAD False -> after post-roll seconds, finalize & transcribe
+  - On finalize trigger, publish utterance_end=True once (pulse).
+  - Fix: hotwords may be list/tuple or string; normalize to string for faster-whisper.
 """
 
 import threading
@@ -31,7 +29,6 @@ import rospy
 from std_msgs.msg import String, Bool
 from audio_common_msgs.msg import AudioData
 
-# faster-whisper
 from faster_whisper import WhisperModel
 
 
@@ -42,12 +39,11 @@ def pcm16le_bytes_to_float32(pcm_bytes: bytes) -> np.ndarray:
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
     if pcm.size == 0:
         return np.zeros((0,), dtype=np.float32)
-    f32 = pcm.astype(np.float32) / 32768.0
-    return f32
+    return (pcm.astype(np.float32) / 32768.0).astype(np.float32)
 
 
 def compute_rms_peak_int16(pcm_bytes: bytes) -> Tuple[float, int, int]:
-    """Return (rms, peak, n_samples) computed from int16 PCM bytes."""
+    """Return (rms, peak, n_samples) from int16 PCM bytes."""
     if not pcm_bytes:
         return 0.0, 0, 0
     x = np.frombuffer(pcm_bytes, dtype=np.int16)
@@ -65,7 +61,10 @@ class FasterWhisperASRNode:
         # ---- Params ----
         self.audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
         self.vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
-        self.text_topic = rospy.get_param("~text_topic", "/asr/text")
+
+        # GPSR-friendly defaults
+        self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
+        self.utterance_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
 
         # Audio format assumptions
         self.sample_rate = int(rospy.get_param("~sample_rate", 16000))
@@ -75,13 +74,14 @@ class FasterWhisperASRNode:
         self.pre_roll_sec = float(rospy.get_param("~pre_roll_sec", 0.20))
         self.post_roll_sec = float(rospy.get_param("~post_roll_sec", 0.35))
         self.max_segment_sec = float(rospy.get_param("~max_segment_sec", 20.0))
+        self.min_segment_sec = float(rospy.get_param("~min_segment_sec", 0.30))
 
         # Transcribe options
-        self.device = rospy.get_param("~device", "auto")  # "cuda", "cpu", "auto"
-        self.compute_type = rospy.get_param("~compute_type", "auto")  # "int8_float16", "float16", "int8", ...
-        self.model_size = rospy.get_param("~model_size", "small")  # "base", "small", "medium", "large-v3", ...
-        self.language = rospy.get_param("~language", "en")  # "en" or None/"" for auto
-        self.task = rospy.get_param("~task", "transcribe")  # "transcribe" or "translate"
+        self.device = rospy.get_param("~device", "auto")           # "cuda", "cpu", "auto"
+        self.compute_type = rospy.get_param("~compute_type", "auto")
+        self.model_size = rospy.get_param("~model_size", "small")
+        self.language = rospy.get_param("~language", "en")         # "" or None -> auto
+        self.task = rospy.get_param("~task", "transcribe")         # "transcribe" or "translate"
 
         self.beam_size = int(rospy.get_param("~beam_size", 5))
         self.best_of = int(rospy.get_param("~best_of", 5))
@@ -98,8 +98,10 @@ class FasterWhisperASRNode:
         self.log_audio_stats = bool(rospy.get_param("~log_audio_stats", True))
         self.audio_stats_interval_sec = float(rospy.get_param("~audio_stats_interval_sec", 0.5))
 
-        # Publish empty if short / too quiet?
-        self.min_segment_sec = float(rospy.get_param("~min_segment_sec", 0.30))
+        # Utterance end pulse behavior
+        self.utterance_end_pulse_true_only = bool(rospy.get_param("~utterance_end_true_only", True))
+        # If True: publish only True once. If False: publish True then False (rarely needed)
+        self.utterance_end_fall_delay_sec = float(rospy.get_param("~utterance_end_fall_delay_sec", 0.0))
 
         # ---- State ----
         self._lock = threading.RLock()
@@ -127,6 +129,7 @@ class FasterWhisperASRNode:
 
         # ---- ROS I/O ----
         self.pub_text = rospy.Publisher(self.text_topic, String, queue_size=10)
+        self.pub_utt_end = rospy.Publisher(self.utterance_end_topic, Bool, queue_size=10)
 
         self.sub_audio = rospy.Subscriber(self.audio_topic, AudioData, self._on_audio, queue_size=50)
         self.sub_vad = rospy.Subscriber(self.vad_topic, Bool, self._on_vad, queue_size=50)
@@ -138,18 +141,15 @@ class FasterWhisperASRNode:
         rospy.loginfo(f" audio_topic={self.audio_topic}")
         rospy.loginfo(f" vad_topic={self.vad_topic}")
         rospy.loginfo(f" text_topic={self.text_topic}")
+        rospy.loginfo(f" utterance_end_topic={self.utterance_end_topic}")
 
     # ---------- Hotwords fix ----------
     @staticmethod
     def _normalize_hotwords(hotwords: Union[None, str, List, Tuple]) -> Optional[str]:
-        """
-        faster-whisper expects hotwords as a string (it calls .strip()).
-        ROS yaml often turns it into list. Normalize robustly.
-        """
+        """Normalize hotwords to a string (faster-whisper calls .strip())."""
         if hotwords is None:
             return None
 
-        # If it's already bytes -> decode
         if isinstance(hotwords, (bytes, bytearray)):
             hotwords = hotwords.decode("utf-8", errors="ignore")
 
@@ -164,7 +164,6 @@ class FasterWhisperASRNode:
             s_join = " ".join(tokens).strip()
             return s_join if s_join else None
 
-        # otherwise treat as string
         s = str(hotwords).strip()
         return s if s else None
 
@@ -176,16 +175,14 @@ class FasterWhisperASRNode:
                 self._is_speech = True
                 self._pending_finalize = False
                 self._pending_finalize_time = None
-                rospy.loginfo("SileroVADNode: speech start (prob=unknown)")  # probは別トピックなら拡張
+                rospy.loginfo("SileroVADNode: speech start")
 
-                # start new segment: include pre-roll
                 self._start_segment_locked(now)
 
             elif (not msg.data) and self._is_speech:
                 self._is_speech = False
-                rospy.loginfo("SileroVADNode: speech end (prob=unknown)")
+                rospy.loginfo("SileroVADNode: speech end")
 
-                # schedule finalize after post-roll
                 self._pending_finalize = True
                 self._pending_finalize_time = now + self.post_roll_sec
 
@@ -207,63 +204,54 @@ class FasterWhisperASRNode:
             # Update pre-roll ring buffer always
             self._push_pre_roll_locked(pcm_bytes)
 
-            # If currently in speech, append to segment
+            # If currently in speech, append
             if self._is_speech:
                 self._append_segment_locked(pcm_bytes, now)
 
-                # If segment too long, force finalize
+                # If too long, force finalize
                 if self._segment_start_time is not None:
                     dur = now - self._segment_start_time
                     if dur >= self.max_segment_sec:
                         rospy.logwarn(f"ASR: max_segment_sec reached ({dur:.2f}s). Forcing finalize.")
                         self._pending_finalize = True
-                        self._pending_finalize_time = now  # finalize asap
+                        self._pending_finalize_time = now  # asap
 
-            # If pending finalize (post-roll), also keep collecting audio until finalize time
+            # If pending finalize, keep collecting post-roll audio
             if self._pending_finalize and self._segment_start_time is not None:
-                # keep collecting post-roll audio bytes
                 self._append_segment_locked(pcm_bytes, now)
 
     def _timer_cb(self, _evt):
         with self._lock:
-            if not self._pending_finalize:
-                return
-            if self._pending_finalize_time is None:
+            if not self._pending_finalize or self._pending_finalize_time is None:
                 return
             if time.time() < self._pending_finalize_time:
                 return
 
-            # finalize
+            # finalize trigger reached
             chunks = list(self._segment_chunks)
             samples = int(self._segment_samples)
+
+            # reset state (avoid re-entrancy while transcribing)
             self._pending_finalize = False
             self._pending_finalize_time = None
-
-            # reset segment state before transcribe (avoid re-entrancy)
             self._segment_chunks = []
             self._segment_samples = 0
             self._segment_start_time = None
+
+        # ---- IMPORTANT: utterance_end pulse (std_msgs/Bool) ----
+        self._publish_utterance_end_pulse()
 
         # Transcribe outside lock
         self._finalize_segment(chunks, samples)
 
     # ---------- Segment management ----------
     def _push_pre_roll_locked(self, pcm_bytes: bytes):
-        # Keep a ring buffer by samples
         self._pre_roll_buf.append(pcm_bytes)
 
-        # crude accounting: each sample is 2 bytes * channels (assume S16LE)
-        bytes_per_sample = 2 * max(1, self.channels)
+        bytes_per_sample = 2 * max(1, self.channels)  # S16LE
         max_bytes = self._pre_roll_samples * bytes_per_sample
 
-        total = 0
-        # drop from left until within limit
-        for b in reversed(self._pre_roll_buf):
-            total += len(b)
-            if total > max_bytes:
-                break
-        # Now total is bytes from tail; remove older ones if buffer too big
-        # Simplify by popping until size approx
+        # Pop left until within size
         while True:
             cur_total = sum(len(x) for x in self._pre_roll_buf)
             if cur_total <= max_bytes:
@@ -280,7 +268,6 @@ class FasterWhisperASRNode:
 
     def _append_segment_locked(self, pcm_bytes: bytes, now: float):
         if self._segment_start_time is None:
-            # VAD may be noisy; start a segment anyway if audio arrives during speech
             self._start_segment_locked(now)
         self._segment_chunks.append(pcm_bytes)
         self._segment_samples += self._estimate_samples([pcm_bytes])
@@ -288,17 +275,33 @@ class FasterWhisperASRNode:
     def _estimate_samples(self, chunks: List[bytes]) -> int:
         if not chunks:
             return 0
-        bytes_per_sample = 2 * max(1, self.channels)  # S16LE
+        bytes_per_sample = 2 * max(1, self.channels)
         total_bytes = sum(len(c) for c in chunks)
         return int(total_bytes // bytes_per_sample)
 
+    # ---------- Utterance end ----------
+    def _publish_utterance_end_pulse(self):
+        # True pulse once
+        self.pub_utt_end.publish(Bool(data=True))
+
+        # Optional: publish False after a delay (rarely needed)
+        if (not self.utterance_end_pulse_true_only) and self.utterance_end_fall_delay_sec >= 0.0:
+            delay = float(self.utterance_end_fall_delay_sec)
+            if delay <= 0.0:
+                self.pub_utt_end.publish(Bool(data=False))
+            else:
+                def _fall():
+                    time.sleep(delay)
+                    self.pub_utt_end.publish(Bool(data=False))
+                threading.Thread(target=_fall, daemon=True).start()
+
     # ---------- Transcription ----------
     def _finalize_segment(self, chunks: List[bytes], samples: int):
-        sec = samples / float(self.sample_rate) if self.sample_rate > 0 else 0.0
-        rospy.loginfo(f"ASR: VAD OFF -> finalize pending (post_roll={self.post_roll_sec:.2f}s, samples={samples})")
+        rospy.loginfo(f"ASR: finalize (post_roll={self.post_roll_sec:.2f}s, samples={samples})")
 
+        sec = samples / float(self.sample_rate) if self.sample_rate > 0 else 0.0
         if sec < self.min_segment_sec:
-            rospy.logwarn(f"ASR: segment too short ({sec:.2f}s). Skip.")
+            rospy.logwarn(f"ASR: segment too short ({sec:.2f}s). Skip transcription.")
             return
 
         pcm_bytes = b"".join(chunks)
@@ -315,25 +318,21 @@ class FasterWhisperASRNode:
             rospy.loginfo("ASR: empty result.")
             return
 
-        # publish
         self.pub_text.publish(String(data=text))
         rospy.loginfo(f"ASR: '{text}' (conf={conf:.3f})")
 
     def _transcribe(self, audio_f32: np.ndarray) -> Tuple[str, float]:
-        # Normalize hotwords (THIS FIXES YOUR CRASH)
         hotwords = self._normalize_hotwords(self.hotwords)
 
         if hotwords is not None:
-            rospy.loginfo(f"ASR hotwords type={type(hotwords)} value='{hotwords}'")
+            rospy.loginfo(f"ASR hotwords='{hotwords}'")
         else:
             rospy.loginfo("ASR hotwords=None")
 
-        # language: allow "" or None for auto
         lang = self.language
         if lang is not None and isinstance(lang, str) and lang.strip() == "":
             lang = None
 
-        # Run faster-whisper
         segments, info = self.model.transcribe(
             audio_f32,
             language=lang,
@@ -341,38 +340,34 @@ class FasterWhisperASRNode:
             beam_size=self.beam_size,
             best_of=self.best_of,
             temperature=self.temperature,
-            vad_filter=False,  # external VAD is used
-            hotwords=hotwords,  # must be str or None
+            vad_filter=False,  # external VAD
+            hotwords=hotwords,
             condition_on_previous_text=self.condition_on_previous_text,
             no_speech_threshold=self.no_speech_threshold,
             log_prob_threshold=self.log_prob_threshold,
             compression_ratio_threshold=self.compression_ratio_threshold,
         )
 
-        # Collect text + a simple confidence proxy
         seg_list = list(segments)
         text = "".join([s.text for s in seg_list]).strip()
 
-        # Confidence: use avg_logprob if available; map to [0,1] roughly
-        # Note: faster-whisper's info may not have a direct "confidence".
+        # crude confidence proxy
         conf = 0.0
         avg_lp = getattr(info, "average_logprob", None)
         if avg_lp is None:
-            # fallback: try from segments
             lps = [getattr(s, "avg_logprob", None) for s in seg_list]
             lps = [x for x in lps if isinstance(x, (float, int))]
             if lps:
                 avg_lp = float(np.mean(lps))
 
         if isinstance(avg_lp, (float, int)):
-            # crude squashing: logprob typically negative; -1 ~ decent
             conf = float(1.0 / (1.0 + np.exp(- (avg_lp + 1.0))))  # heuristic
 
         return text, conf
 
 
 def main():
-    node = FasterWhisperASRNode()
+    _ = FasterWhisperASRNode()
     rospy.spin()
 
 
