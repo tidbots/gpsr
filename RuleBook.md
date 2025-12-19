@@ -8,6 +8,10 @@ abilities.
 Task planning, object/people detection and recognition, object feature recognition, object manipulation
 
 ## Setup
+1. First list item
+   - First nested list item
+     - Second nested list item
+     - 
 - Locations:
   – Task location: The task takes place inside the Arena. Commands may require the
 robot to leave the room. The Arena is in its nominal configuration for this task.
