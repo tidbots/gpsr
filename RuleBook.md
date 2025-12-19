@@ -91,10 +91,11 @@ The maximum time for this test is **7:00** minutes.
 | Action  | Score |
 | ------------- | ------------- |
 | Main Goal  |   |
-| Demonstrate a plan has been generated  | 3×80  |
-| Solving the command  | 3×100  |
+| Understand the spoken command  | 3×80  |
+| Demonstrate a plan has been generated  | 3×100 |
+| Solving the command  | 3×250  |
 | Bonus Rewards  |   |
-| Interleaved Task Bonus  | 3×250  |
+| Interleaved Task Bonus  | 200  |
 | Penalties  |   |
 | Using a custom operator  | 3×-20  |
 | Request a rephrasing  | 6×-30  |
