@@ -87,23 +87,6 @@ The maximum time for this test is **7:00** minutes.
 
 
 
- 
- 3×100
- 3×250
-
- 200
-
- 3×–20
-````````` 6×–30
-Bypassing speech recognition 3×–50
-Human assistance: will apply a percentage penalty according to similar penalties in
-other tests.
-3×–250
-Special Penalties & Bonuses
-Not attending (see sec. 3.8.1) –500
-Using alternative start signal (see sec. 3.6.8) –100
-Outstanding performance (see sec. 3.8.3) 149
-Total Score (excluding special penalties & standard bonuses) 1490
 
 | Action  | Score |
 | ------------- | ------------- |
@@ -122,3 +105,5 @@ other tests.  | 3×-250  |
 | Not attending (see sec. 3.8.1)  | -500  |
 | Using alternative start signal (see sec. 3.6.8)  | -100  |
 | Outstanding performance (see sec. 3.8.3)  | 149  |
+| ------------- | ------------- |
+Total Score (excluding special penalties & standard bonuses) 1490
