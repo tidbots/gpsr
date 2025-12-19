@@ -2,90 +2,15 @@
 ロボットは、幅広く異なる能力を必要とする命令を理解し実行することが求められる。
 
 
-実際の音声（Whisper 経由）でよく出る誤認識のログをいくつか貼ってもらえれば、
-
-COMMON_GPSR_CORRECTIONS の具体的な中身
-
+## ToDo
 initial_prompt に入れておくと良い単語の微調整
 
 
 
-その上で、さっきの GPSR パーサノードも起動しておけば
-
-audio → VAD → faster_whisper_asr_node → /asr/text
-      → gpsr_parser_node             → /gpsr/intent
-
-
-まで一気通貫になります。
-
-この状態で実際の誤認識ログがたまってきたら、
-apply_gpsr_corrections() の辞書を一緒に育てていきましょう。
-（「この単語が毎回こう間違う」という例を貼ってもらえれば、それ前提でガッと追加します。）
-
-
-✅ 現状完成している構成
-🎙️ 1) Audio → VAD → Faster-Whisper
-
-faster_whisper_asr_node.py は
-
-language = en
-
-beam search 設定強化
-
-GPSR 用語彙（initial_prompt & hotwords）
-
-スペース結合
-
-誤認識補正辞書
-を搭載して GPSR 特化 ASRとして最適化済み。
-
-🧠 2) /asr/text → GPSR パーサ
-
-gpsr_parser_node.py により
-
-全種テンプレート対応を目指した
-
-3 ステップ構造の kind + steps + fields JSON
-に落とし込む基盤完了。
-
-🔗 3) ROS1 トピック接続
-
-/audio → /asr/text → /gpsr/intent
-
-ROS1 Noetic + Docker で確実に動作。
-
-🎯 4) 「誤認識 → 補正 → パース」の一貫動作
-
-ASR → correction → parse で
-"Find a sponge in the living room then get it and bring it to me"
-が正しく解釈できるのを確認済み。
-
-今の構成が強い理由
-問題	対策
-英語認識精度	Whisper を en & beam_size=7 に
-ドメイン固有語彙	initial_prompt + hotwords
-単語連結	スペース結合・正規化
-特定誤り	apply_gpsr_corrections()
-多様な表現	GPSR パーサの best_match()
-テンプレート逆引き	kind+steps 構造化出力
-
-これは普通のロボカップ音声システムと比べて かなり高度です。
-
-
-##　CommandGenerator
+##　CommandGeneratorで命令文を作る
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
-
-シンプル ASR 動作確認
-VADをスキップ
-コンテナ内で：
-```
-cd /hsr_ws
-source devel/setup.bash
-roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
-```
-
-発話サンプル
+命令のサンプル
 ```
 Tell me how many people in the bathroom are wearing white sweaters
 Tell the gesture of the person at the bedside table to the person at the dishwasher
@@ -98,9 +23,65 @@ Tell me how many drinks there are on the dishwasher
 Tell me what is the lightest cleaning supply on the sofa
 Tell me how many lying persons are in the bathroom
 Tell me how many food there are on the sink
+...
+...
 ```
 
-## 1. ROS パッケージ構成（例）
+## インストールとDockerコンテナの実行
+```
+cd ~/
+git clone https://github.com/tidbots/gpsr.git
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose build
+docker compose up -d
+```
+
+別のターミナルから
+```
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose exec noetic-audio bash
+roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
+```
+
+別のターミナルから、認識した文字列を表示
+```
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose exec noetic-audio bash
+rostopic echo /asr/text
+```
+文字化けしないバージョン
+```
+rosrun hsr_audio_pipeline asr_plain_echo.py
+```
+
+別のターミナルから、コマンドを解析した文字列を表示
+```
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose exec noetic-audio bash
+rostopic echo /gpsr/intent
+```
+文字化けしないバージョン
+```
+rosrun hsr_audio_pipeline gpsr__echo.py
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## 1. ROS パッケージ構成
+**要アップデート**
 ```
 hsr_gpsr_system/          （メタパッケージ or リポジトリルート）
 ├── hsr_gpsr_bringup/     … 全体起動用 launch・設定
@@ -316,320 +297,9 @@ task_executor が「手・口」という分担です。
 ```
 
 
-```
-export PULSE_SERVER=unix:/run/user/1000/pulse/native
-docker compose up -d --build
-```
 
-```
-docker compose exec noetic-audio bash
-roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
-```
-```
-docker compose exec noetic-audio bash
-rostopic echo /gpsr/intent
-```
-```
-docker compose exec noetic-audio bash
-rostopic echo /asr/text
-```
-文字化けしない
-```
-rosrun hsr_audio_pipeline asr_plain_echo.py
-```
-```
-rosrun hsr_audio_pipeline gpsr__echo.py
-```
 
 
-# 誤認識ログから correction 辞書を自動生成するツール
-## 入力
-```
-1. /asr/text ログ
-または
-ASR出力ログファイル（例：asr.log）
-
-2. GPSR 正解語彙リスト（names, locations, objects, categories）
-
-## 出力
-以下のような辞書：
-```
-{
-  "livingroom": "living room",
-  "livin room": "living room",
-  "bath room": "bathroom",
-  "corn flakes": "cornflakes",
-}
-```
-## How?
-1. ASRログから単語頻度を抽出
-例：
-```
-tell me how many persons raising their right arm are in the livin room
-```
-→ 分割して
-- livin
-- room
-- livingroom
-- etc.
-
-2.語彙リストと距離計算
-例えば：
-- Levenshtein距離
-- Jaro-Winkler
-- Token-based fuzzy matching
-を用いると、
-```
-"livin room" → "living room"   (距離極小)
-"bath room"  → "bathroom"      (距離極小)
-```
-を自動推定できます。
-
-3. 閾値ルール
-- 距離 < 2 なら補正候補
-- 距離 < 4 なら人工判断必要
-
-## ツール
-```
-from fuzzywuzzy import fuzz
-from collections import Counter
-
-def extract_errors(log_file, gpsr_vocab, threshold=80):
-    counter = Counter()
-    for line in open(log_file):
-        for word in tokenize(line):
-            if word.lower() not in gpsr_vocab:
-                counter[word] += 1
-
-    corrections = {}
-
-    for wrong, _ in counter.most_common():
-        best = None
-        best_score = 0
-        for correct in gpsr_vocab:
-            score = fuzz.ratio(wrong, correct)
-            if score > best_score:
-                best = correct
-                best_score = score
-
-        if best_score >= threshold:
-            corrections[wrong] = best
-
-    return corrections
-```
-出力例：
-```
-{
- "livin room": "living room",
- "book shelve": "bookshelf",
- "corn flakes": "cornflakes",
-}
-```
-これをそのまま：
-```
-apply_gpsr_corrections()
-```
-に追加すればOK。
-
-## 運用方法
-### Step 1 — ログ収集
-```
-rostopic echo /asr/text > asr.log
-```
-
-大会前になれば1–2時間で1万行ぐらい集まる。
-
-### Step 2 — ツール実行
-```
-python gen_corrections.py asr.log
-```
-→ correction 辞書候補生成
-
-### Step 3 — 人間が確認
-- 明らかに誤り
-- false positive でないか
-
-### Step 4 — 修正辞書追加 & 再学習
-
-## なぜ “自動生成”が重要か
-- 長期運用時
-  - 環境ノイズ差
-  - 話者アクセント
-  - マイク違い
-→ 誤認識傾向が変わる
-
-- ロボカップ現場
-  - 英語アクセント多様
-  - 語彙が限定的
-→ correction辞書が強い
-
-- 人手で気づけない誤りも拾える
-
-つまり、
-- 耳を鍛えるのではなく
-- 誤識を吸収する辞書を鍛える
-というアプローチ。
-
-## 拡張案
-- 自動教師あり学習との組合せ
-  - wrong → correct の統計が蓄積されると
-  - correction辞書が自動強化
-
-- 特定話者モデル
-  - 話者特徴に応じた correction 優先順位調整
-
-## 実装
-誤認識ログから correction 辞書を自動生成するツール一式
-- gpsr_vocab.py … GPSR の語彙をひとまとめにしたモジュール
-- gen_corrections.py … ASRログから correction 候補を自動生成するツール本体
-- （おまけ）apply_corrections_example.py … 生成した辞書をどう使うかのサンプル
-全部スタンドアロンな Python スクリプトで、ROS に依存しないので，Docker コンテナの中でそのまま動かせる
-
-## 使い方
-1. ログを集める
-``@
-rostopic echo /asr/text > asr.log
-```
-
-2. 辞書候補を生成する
-```
-python3 gen_corrections.py asr.log > corrections_candidates.py
-```
-
-3. corrections_candidates.py を開いて
-- 「これは明らかに正しい」「これは怪しい」を人間が確認
-- OKなものだけ CORRECTIONS として採用
-
-4. faster_whisper_asr_node.py の apply_gpsr_corrections() に統合
-5. 再度ログを取りながら、定期的に 1〜4 を回す
-
-ゴールのイメージ
-
-faster_whisper_asr_node.py には現在こういう関数があります：
-
-def apply_gpsr_corrections(self, text: str) -> str:
-    corrections = {
-        "livingroom": "living room",
-        "livin room": "living room",
-        "bath room": "bathroom",
-        ...
-    }
-
-    fixed = text
-    for wrong, right in corrections.items():
-        fixed = fixed.replace(wrong, right)
-        fixed = fixed.replace(wrong.capitalize(), right)
-    return fixed
-
-
-💡 ここに、人間が書いた correction 辞書ではなく、
-自動生成ツールで作った辞書を取り込む
-というのが「統合」です。
-
-🔧 STEP 1 — 自動生成ツールで correction 候補を作る
-
-例えば：
-
-python gen_corrections.py asr.log > corrections_candidates.py
-
-
-この corrections_candidates.py はこういう内容になります：
-
-# corrections_candidates.py
-CORRECTIONS = {
-    "livin room": "living room",  # score=92.3, count=7
-    "livingroom": "living room",  # score=90.1, count=3
-    "corn flakes": "cornflakes",  # score=88.1, count=4
-}
-
-🔧 STEP 2 — faster_whisper_asr_node.py に取り込む
-2-1. ファイルを import する
-
-faster_whisper_asr_node.py の上部に：
-
-from corrections_candidates import CORRECTIONS
-
-
-と1行追加します。
-
-faster_whisper_asr_node.py
-corrections_candidates.py
-gpsr_vocab.py
-
-
-が同じフォルダにある必要があります。
-
-2-2. apply_gpsr_corrections() をこう変える
-before
-def apply_gpsr_corrections(self, text: str) -> str:
-    corrections = {
-        "livingroom": "living room",
-        "livin room": "living room",
-        "bath room": "bathroom",
-        ...
-    }
-
-    fixed = text
-    for wrong, right in corrections.items():
-        fixed = fixed.replace(wrong, right)
-    return fixed
-
-after（統合版）
-from corrections_candidates import CORRECTIONS  # 自動生成辞書を import
-
-def apply_gpsr_corrections(self, text: str) -> str:
-    fixed = text
-
-    # 自動生成辞書を適用
-    for wrong, right in CORRECTIONS.items():
-        fixed = fixed.replace(wrong, right)
-        fixed = fixed.replace(wrong.capitalize(), right.capitalize())
-
-    return fixed
-
-
-つまり：
-
-前は：手書きの小さな辞書
-
-今後は：gen_corrections.py が作る CORRECTIONS をそのまま利用
-
-になる、ということです。
-
-「apply_gpsr_corrections() に統合」とは
-→ apply_gpsr_corrections 関数は correction 辞書を参照するだけにし、
-correction辞書は外部ファイルから供給する
-
-という意味。
-
-
-運用のメリット
-👍 faster_whisper_asr_node.py を編集しなくていい
-
-誤認識辞書を育てるときは：
-
-asr.log を収集
-
-gen_corrections.py 実行
-
-corrections_candidates.py を差し替え
-
-するだけで済む。
-
-👍 correction 辞書が肥大しても整理しやすい
-
-apply_gpsr_corrections() 自体は変わらないので
-ロジックはシンプルなまま。
-
-👍 ロボカップ現場で高速チューニングできる
-
-会場ノイズ
-
-審判のアクセント
-
-マイク特性
-
-に応じて correction だけ更新できる。
 
 
 # デバッグ
@@ -645,6 +315,15 @@ rostopic pub /asr/text std_msgs/String \
 rostopic echo /gpsr/intent
 ```
 
+
+シンプル ASR 動作確認
+VADをスキップ
+コンテナ内で：
+```
+cd /hsr_ws
+source devel/setup.bash
+roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
+```
 
 
 「テーブルの上のペットボトルを持ってきて」 と発話すると、
