@@ -111,6 +111,25 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 
 ## 全体アーキテクチャ
 ```
+audio_capture
+   |
+   v
+silero_vad_node
+   |  (speech_start / speech_end)
+   v
+faster_whisper_asr_node
+   |  /gpsr/asr/raw_text
+   |  /gpsr/asr/text (corrected)
+   |  /gpsr/asr/confidence
+   |  /gpsr/asr/utterance_end
+   v
+gpsr_parser_node
+   |  /gpsr/intent (JSON)
+   v
+gpsr_smach_node
+```
+
+```
 ┌───────────────────────────────────────────────────────────────┐
 │                   Host PC / Docker コンテナ                  │
 │                     (ROS Noetic, hsr_ws)                     │
