@@ -5,7 +5,7 @@ import rospy
 import json
 from std_msgs.msg import String
 
-from hsr_audio_pipeline.gpsr_parser import GpsrParser, GpsrCommand
+from gpsr_parser import GpsrParser, GpsrCommand
 
 
 class GpsrParserNode:
