@@ -7,12 +7,14 @@ abilities.
 ## Focus
 Task planning, object/people detection and recognition, object feature recognition, object manipulation
 
-##Setup
+## Setup
 - Locations:
   – Task location: The task takes place inside the Arena. Commands may require the
 robot to leave the room. The Arena is in its nominal configuration for this task.
+
 – Start location: The robot starts outside the Arena. When the door opens, it must
 navigate towards the Instruction Point.
+
 – Instruction point: The robot returns to this point after completing all the commands.
 • People:
 – Professional Operator: The referee issues standard commands to the robot. If the
