@@ -42,7 +42,7 @@ WORKDIR ${CATKIN_WS}
 
 # hsr_audio_pipeline パッケージをコピー
 # （repo_root/hsr_audio_pipeline → /hsr_ws/src/hsr_audio_pipeline）
-COPY hsr_audio_pipeline ${CATKIN_WS}/src/hsr_audio_pipeline
+COPY src/hsr_audio_pipeline ${CATKIN_WS}/src/hsr_audio_pipeline
 
 # === ワークスペースビルド ===
 RUN . /opt/ros/noetic/setup.sh \
