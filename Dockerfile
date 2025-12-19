@@ -1,127 +1,60 @@
 # Dockerfile
 FROM ros:noetic-ros-base
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    TZ=Asia/Tokyo
+ARG DEBIAN_FRONTEND=noninteractive
 
-# === ユーザ設定 ===
+# === ユーザ設定（必要に応じて変更） ===
 ARG USER_NAME=roboworks
 ARG GROUP_NAME=roboworks
 ARG UID=1000
 ARG GID=1000
 
-# ユーザ作成
+# ユーザ作成（.ros PermissionError 回避）
 RUN groupadd -g ${GID} ${GROUP_NAME} \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} ${USER_NAME} \
  && echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# ===== OS パッケージ =====
-#  - audio_capture 用: audio-common
-#  - いずれ使う smach もここで入れておく
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        python3-pip python3-dev build-essential \
-        ros-noetic-audio-common \
-        ros-noetic-audio-common-msgs \
-        ros-noetic-smach \
-        ros-noetic-smach-ros && \
-    rm -rf /var/lib/apt/lists/*
+# === 依存パッケージインストール ===
+RUN apt-get update && apt-get install -y \
+    # audio_capture / audio_common
+    ros-noetic-audio-common \
+    # ビルド・ユーティリティ
+    build-essential \
+    ros-noetic-catkin \
+    git \
+    # Python / numpy
+    python3-pip \
+    python3-numpy \
+    # オーディオ関係ツール
+    alsa-utils \
+    pulseaudio \
+    pulseaudio-utils \
+    libasound2-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-# ---- system deps ----
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y \
-        ffmpeg \
-        pkg-config \
-        libavformat-dev \
-        libavcodec-dev \
-        libavdevice-dev \
-        libavutil-dev \
-        libavfilter-dev \
-        libswscale-dev \
-        libswresample-dev \
-    && rm -rf /var/lib/apt/lists/*
-    
-# ---- Python deps: torch + faster-whisper (Python 3.8 対応構成) ----
-RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
-    pip3 install --no-cache-dir \
-        "torch==2.4.1+cpu" \
-        --index-url https://download.pytorch.org/whl/cpu && \
-    # PyAV をビルドするために Cython を旧バージョンに固定
-    pip3 install --no-cache-dir "cython<3" && \
-    # faster-whisper 0.10.1 が要求する av==10.* を明示的に入れる
-    pip3 install --no-cache-dir "av==10.0.0" && \
-    # ctranslate2 / tokenizers / huggingface-hub はバージョンを絞る
-    pip3 install --no-cache-dir \
-        "ctranslate2<4.5" \
-        "tokenizers<0.20" \
-        "huggingface-hub<0.23" && \
-    # 最後に faster-whisper 本体（依存関係はすでに入っているので --no-deps）
-    pip3 install --no-cache-dir "faster-whisper==0.10.1" --no-deps
+# pip は後で Whisper / VAD 用にも使える
+RUN pip3 install --no-cache-dir --upgrade pip
 
-
-
-# === 必要パッケージ ===
-#RUN apt-get update && apt-get install -y \
-#   ros-noetic-audio-common \
-#   ros-noetic-smach ros-noetic-smach-ros \
-#    build-essential \
-#    ros-noetic-catkin \
-#    git \
-#    python3-pip \
-#    python3-numpy \
-#    alsa-utils \
-#    pulseaudio \
-#    pulseaudio-utils \
-#    libasound2-dev \
-#      ffmpeg \
-#    pkg-config \
-#    libavcodec-dev \
-#    libavformat-dev \
-#    libavdevice-dev \
-#    libavutil-dev \
-#    libavfilter-dev \
-#    libswscale-dev \
-#   libswresample-dev \
-# && rm -rf /var/lib/apt/lists/*
-
-
-# PyTorch & faster-whisper (CPU版, Python 3.8 対応)
-#RUN pip3 install --no-cache-dir "typing-extensions<4.9" "packaging<24" && \
-#    pip3 install --no-cache-dir \
-#        "torch==2.4.1+cpu" \
-#        --index-url https://download.pytorch.org/whl/cpu && \
-#    pip3 install --no-cache-dir \
-#        "faster-whisper==0.10.1" \
-#       "ctranslate2<4.5" \
-#        "tokenizers<0.20" \
-#        "huggingface-hub<0.23"
- 
-#RUN pip3 install --no-cache-dir --upgrade pip \
-# && pip3 install --no-cache-dir torch torchaudio packaging
-#RUN pip3 install --no-cache-dir --upgrade pip \
-# && pip3 install --no-cache-dir "tokenizers<0.21" \
-# && pip3 install --no-cache-dir "faster-whisper<1.1.0"
- 
-# === catkin workspace ===
+# === catkin ワークスペース作成 ===
 ENV CATKIN_WS=/hsr_ws
 RUN mkdir -p ${CATKIN_WS}/src
 WORKDIR ${CATKIN_WS}
 
-# Copy user src/ directory
-COPY src ${CATKIN_WS}/src
+# hsr_audio_pipeline パッケージをコピー
+# （repo_root/hsr_audio_pipeline → /hsr_ws/src/hsr_audio_pipeline）
+COPY hsr_audio_pipeline ${CATKIN_WS}/src/hsr_audio_pipeline
 
-# === catkin build ===
+# === ワークスペースビルド ===
 RUN . /opt/ros/noetic/setup.sh \
  && catkin_make
 
-# === setup.bash を自動ロード ===
+# === シェル起動時の環境設定 ===
 RUN echo "source /opt/ros/noetic/setup.bash" >> /home/${USER_NAME}/.bashrc \
  && echo "source /hsr_ws/devel/setup.bash" >> /home/${USER_NAME}/.bashrc
 
 USER ${USER_NAME}
 WORKDIR /home/${USER_NAME}
 
+# ベースイメージのエントリポイントを利用
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["bash"]
