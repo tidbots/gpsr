@@ -10,6 +10,15 @@ import io
 import os
 from typing import List, Optional
 
+# 誤認識収集のため
+from corrections_candidates import CORRECTIONS  # 生成済みファイル
+def apply_gpsr_corrections(self, text: str) -> str:
+    fixed = text
+    for wrong, right in CORRECTIONS.items():
+        fixed = fixed.replace(wrong, right)
+        fixed = fixed.replace(wrong.capitalize(), right.capitalize())
+    return fixed
+
 
 class FasterWhisperASRNode(object):
     def __init__(self):
