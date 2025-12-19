@@ -43,8 +43,19 @@ flowchart LR
     PARSER -->|/gpsr/intent (gpsr_intent_v1)| SMACH
     SMACH --> NAV
 ```
-
 ---
+### 設計方針
+- 発話確定（utterance_end）駆動
+  - ASRの途中結果で intent が暴発するのを防止
+
+統一 JSON スキーマ
+
+parser / intent 系の出力を完全に共通化
+
+競技運用耐性
+
+聞き返し・誤認識・時間切れを明示的に扱う
+
 
 ## 3. 音声入力・ASR 処理フロー（Step 1）
 
