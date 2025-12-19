@@ -1,0 +1,38 @@
+<launch>
+  <!-- まずはテスト用launchをinclude（上の gpsr_audio_intent_test.launch を同じlaunchフォルダに置く想定） -->
+  <include file="$(find hsr_audio_pipeline)/launch/gpsr_audio_intent_test.launch" />
+
+  <!-- =======================
+       GPSR SMACH (Step 3)
+       ======================= -->
+  <node pkg="hsr_audio_pipeline" type="gpsr_smach_node.py"
+        name="gpsr_smach_node" output="screen">
+
+    <param name="intent_topic" value="/gpsr/intent" />
+    <param name="task_state_topic" value="/gpsr/task_state" />
+    <param name="result_topic" value="/gpsr/result" />
+
+    <!-- GPSR mode -->
+    <param name="mode" value="multi" />                <!-- single | multi -->
+    <param name="max_commands" value="3" />
+    <param name="collect_window_sec" value="12.0" />
+    <param name="global_time_limit_sec" value="420.0" />
+
+    <!-- Navigation -->
+    <param name="dry_run_nav" value="true" />          <!-- まずtrueで確認 -->
+    <param name="move_base_action" value="/move_base" />
+    <param name="nav_timeout_sec" value="40.0" />
+    <param name="per_task_nav" value="false" />
+
+    <!-- Instruction Point (operator pose) -->
+    <param name="operator_pose" value="{frame: map, x: 0.0, y: 0.0, yaw: 0.0}" />
+
+    <!-- 任意: 目的地名→座標（per_task_nav=true の時に利用）
+         例: {kitchen:{frame:map,x:1.0,y:2.0,yaw:0.0}, office:{...}}
+    -->
+    <param name="room_pose_map" value="{}" />
+
+    <!-- SMACH introspection -->
+    <param name="enable_introspection" value="true" />
+  </node>
+</launch>
