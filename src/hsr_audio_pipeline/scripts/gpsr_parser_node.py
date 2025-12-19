@@ -11,7 +11,31 @@ from std_msgs.msg import String, Bool, Float32
 
 from gpsr_parser import GpsrParser
 
+
 class GpsrParserNode:
+    """
+    GPSR parser node (ROS1 / Noetic)
+
+    - Subscribes to /gpsr/asr/text and /gpsr/asr/utterance_end
+    - Parses ONLY when utterance_end(True) arrives
+    - Publishes unified intent schema: gpsr_intent_v1 as std_msgs/String(JSON)
+
+    Output JSON schema (gpsr_intent_v1):
+      {
+        "schema": "gpsr_intent_v1",
+        "ok": true/false,
+        "need_confirm": true/false,
+        "intent_type": "bring|guide|answer|other",
+        "slots": {...},
+        "raw_text": "...",
+        "confidence": 0.0..1.0 or null,
+        "source": "parser",
+        "error": "...",            # if ok=false
+        "command_kind": "...",     # optional
+        "steps": [...]             # optional
+      }
+    """
+
     def __init__(self):
         # ---- Params ----
         self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
@@ -20,19 +44,20 @@ class GpsrParserNode:
 
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
 
-        # utterance_end を受けた時に使う “直近の確定テキスト”
+        # If utterance_end arrives but /gpsr/asr/text timestamp is older than this, ignore.
+        self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 1.0))
+
+        # Optional confidence gating: if >=0 and confidence is available, low confidence -> need_confirm
+        self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
+
+        # ---- Latest ASR ----
         self._latest_text = ""
         self._latest_text_stamp = rospy.Time(0)
+
         self._latest_conf = None
         self._latest_conf_stamp = rospy.Time(0)
 
-        # 何秒以内の text を “同一発話” とみなすか（ASRとイベントの微小なズレ吸収）
-        self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 1.0))
-
-        # 低信頼度なら parse せず need_confirm を返す（0〜1, 無効化は <0）
-        self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
-
-        # ---- Vocabulary (現状維持：既存コードと同じ) ----
+        # ---- Vocabulary (keep consistent with your project) ----
         person_names = [
             "Adel", "Angel", "Axel", "Charlie", "Jane",
             "Jules", "Morgan", "Paris", "Robin", "Simone",
@@ -88,9 +113,7 @@ class GpsrParserNode:
 
         rospy.Subscriber(self.text_topic, String, self._on_text, queue_size=50)
         rospy.Subscriber(self.utt_end_topic, Bool, self._on_utt_end, queue_size=50)
-
-        # confidence はあれば使う（無くても動く）
-        rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)
+        rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)  # optional
 
         rospy.loginfo(
             "gpsr_parser_node: text=%s utterance_end=%s conf=%s -> intent=%s",
@@ -105,14 +128,57 @@ class GpsrParserNode:
         self._latest_conf = float(msg.data)
         self._latest_conf_stamp = rospy.Time.now()
 
+    # ----------------------------
+    # Unified schema helpers
+    # ----------------------------
+    def _coarse_intent_type_from_command(self, cmd_dict: dict) -> str:
+        """Map detailed parser output into coarse intent_type used by SMACH."""
+        kind = (cmd_dict.get("kind") or "").lower()
+        steps = cmd_dict.get("steps") or []
+        actions = " ".join([(s.get("action", "") or "").lower() for s in steps])
+        key = (kind + " " + actions).strip()
+
+        if any(k in key for k in ["guide", "escort", "lead"]):
+            return "guide"
+        if any(k in key for k in ["bring", "fetch", "deliver", "take", "give"]):
+            return "bring"
+        if any(k in key for k in ["count", "tell", "answer", "describe", "how many", "what", "who"]):
+            return "answer"
+        return "other"
+
+    def _extract_common_slots(self, cmd_dict: dict) -> dict:
+        """
+        Merge 'fields' from steps into a flat dict.
+        Also ensures SMACH-friendly keys exist: object, destination, person.
+        """
+        slots = {}
+        for s in (cmd_dict.get("steps") or []):
+            f = s.get("fields") or {}
+            if isinstance(f, dict):
+                slots.update(f)
+
+        out = dict(slots)
+        out.setdefault("object", out.get("obj") or out.get("item") or out.get("thing") or "")
+        out.setdefault("destination", out.get("to") or out.get("dest") or out.get("room") or out.get("location") or "")
+        out.setdefault("person", out.get("name") or out.get("target") or out.get("who") or "")
+        return out
+
+    def _publish(self, payload: dict):
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self.pub_intent.publish(msg)
+
+    # ----------------------------
+    # Utterance-end driven parse
+    # ----------------------------
     def _on_utt_end(self, msg: Bool):
-        # pulse True を期待
+        # utterance_end pulse True expected
         if not bool(msg.data):
             return
 
         now = rospy.Time.now()
         age = (now - self._latest_text_stamp).to_sec()
-        text = self._latest_text.strip()
+        text = (self._latest_text or "").strip()
 
         if (not text) or (age > self.max_text_age_sec):
             rospy.logwarn(
@@ -121,14 +187,19 @@ class GpsrParserNode:
             )
             return
 
-        # optional: confidence gate
+        # Optional confidence gating
         if self.min_confidence >= 0.0 and self._latest_conf is not None:
             if self._latest_conf < self.min_confidence:
                 payload = {
+                    "schema": "gpsr_intent_v1",
                     "ok": False,
-                    "error": "need_confirm",
+                    "need_confirm": True,
+                    "intent_type": "other",
+                    "slots": {},
                     "raw_text": text,
                     "confidence": self._latest_conf,
+                    "source": "parser",
+                    "error": "need_confirm_low_confidence",
                 }
                 self._publish(payload)
                 rospy.logwarn(
@@ -142,31 +213,40 @@ class GpsrParserNode:
         command = self.parser.parse(text)
         if command is None:
             payload = {
+                "schema": "gpsr_intent_v1",
                 "ok": False,
+                "need_confirm": False,
+                "intent_type": "other",
+                "slots": {},
+                "raw_text": text,
+                "confidence": self._latest_conf,
+                "source": "parser",
                 "error": "parse_failed",
-                "raw_text": text,
-                "confidence": self._latest_conf,
             }
-        else:
-            payload = {
-                "ok": True,
-                "command": json.loads(command.to_json()),
-                "raw_text": text,
-                "confidence": self._latest_conf,
-            }
+            self._publish(payload)
+            return
 
+        # Parser -> unified schema
+        cmd_dict = json.loads(command.to_json())
+        payload = {
+            "schema": "gpsr_intent_v1",
+            "ok": True,
+            "need_confirm": False,
+            "intent_type": self._coarse_intent_type_from_command(cmd_dict),
+            "slots": self._extract_common_slots(cmd_dict),
+            "raw_text": text,
+            "confidence": self._latest_conf,
+            "source": "parser",
+            "command_kind": cmd_dict.get("kind"),
+            "steps": cmd_dict.get("steps", []),
+        }
         self._publish(payload)
-
-    def _publish(self, payload: dict):
-        out = String()
-        out.data = json.dumps(payload, ensure_ascii=False)
-        self.pub_intent.publish(out)
 
 
 def main():
     rospy.init_node("gpsr_parser_node")
     _ = GpsrParserNode()
-    rospy.loginfo("gpsr_parser_node started (utterance_end driven).")
+    rospy.loginfo("gpsr_parser_node started (utterance_end driven, unified schema).")
     rospy.spin()
 
 
