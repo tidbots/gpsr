@@ -17,7 +17,7 @@ RUN groupadd -g ${GID} ${GROUP_NAME} \
 # === 依存パッケージインストール ===
 RUN apt-get update && apt-get install -y \
     # audio_capture / audio_common
-    ros-noetic-audio-common \
+    ros-noetic-audio-common ros-noetic-smash\
     # ビルド・ユーティリティ
     build-essential \
     ros-noetic-catkin \
