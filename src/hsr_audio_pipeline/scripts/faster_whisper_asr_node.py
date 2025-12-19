@@ -6,18 +6,16 @@ import numpy as np
 from std_msgs.msg import String, Bool, Float32
 from audio_common_msgs.msg import AudioData
 from faster_whisper import WhisperModel
-import io
-import os
-from typing import List, Optional
 
-# 誤認識収集のため
-#from corrections_candidates import CORRECTIONS  # 生成済みファイル
-#def apply_gpsr_corrections(self, text: str) -> str:
-#    fixed = text
-#    for wrong, right in CORRECTIONS.items():
-#        fixed = fixed.replace(wrong, right)
-#        fixed = fixed.replace(wrong.capitalize(), right.capitalize())
-#    return fixed
+# 自動生成した辞書をここから import する想定
+# 同じパッケージ / ディレクトリに corrections_candidates.py を置いてください
+try:
+    from corrections_candidates import CORRECTIONS
+except ImportError:
+    # まだ用意していない場合でも動くように、空 dict でフォールバック
+    CORRECTIONS = {}
+    rospy.logwarn("faster_whisper_asr_node: corrections_candidates.py not found. "
+                  "CORRECTIONS is empty.")
 
 
 class FasterWhisperASRNode(object):
@@ -31,11 +29,11 @@ class FasterWhisperASRNode(object):
 
         self.sample_rate = int(rospy.get_param("~sample_rate", 16000))
 
-        model_size = rospy.get_param("~model_size", "small")   # tiny, base, small, medium, large-v2, ...
+        model_size = rospy.get_param("~model_size", "small")   # tiny, base, small, ...
         device = rospy.get_param("~device", "cpu")
         compute_type = rospy.get_param("~compute_type", "float32")
 
-        # GPSR は英語コマンドなのでデフォルトを en に
+        # GPSR は英語前提なのでデフォルトを en に
         self.language = rospy.get_param("~language", "en")
 
         # === GPSR 用の語彙 ===
@@ -52,7 +50,7 @@ class FasterWhisperASRNode(object):
             "entrance", "exit",
         ]
         self.gpsr_rooms = [
-            "bedroom", "kitchen", "office", "living room", "bathroom"
+            "bedroom", "kitchen", "office", "living room", "bathroom",
         ]
         self.gpsr_objects = [
             "juice pack", "cola", "milk", "orange juice", "tropical juice",
@@ -81,27 +79,25 @@ class FasterWhisperASRNode(object):
             + self.gpsr_categories
         )
 
-        # Whisper に「こういう単語が出やすいよ」と教えるための文脈
+        # Whisper に「こういう単語が出やすい」と教えるための文脈
         self.initial_prompt = " ".join(vocab_words)
 
-        # hotwords (サポートされている faster-whisper バージョンであれば有効)
-        # - 使えない環境もあるので、transcribe 呼び出し側で例外を見て fallback する
+        # hotwords（対応していない faster-whisper もあるので try/except で扱う）
         self.hotwords = vocab_words
 
-        # === しきい値など ===
-        # VAD が True → False になったときに、その区間を 1 発話として扱う
+        # --- セグメント長の制御 ---
         self.min_segment_duration = float(
             rospy.get_param("~min_segment_duration", 0.5)
-        )  # [sec] これより短いと無視
+        )  # [sec] これより短い区間は無視
         self.max_segment_duration = float(
             rospy.get_param("~max_segment_duration", 15.0)
-        )  # [sec] あまりに長いと分割推奨だが、ここでは警告だけ
+        )  # [sec] 長すぎる場合は警告のみ
 
-        # === 状態 ===
-        self.current_vad = False  # 現在の is_speech
-        self.prev_vad = False     # 直前の is_speech
-        self.segment_buffer: List[np.ndarray] = []
-        self.segment_samples: int = 0
+        # --- VAD 状態 & バッファ ---
+        self.current_vad = False
+        self.prev_vad = False
+        self.segment_buffer = []
+        self.segment_samples = 0
 
         # === モデル読み込み ===
         rospy.loginfo(
@@ -132,42 +128,48 @@ class FasterWhisperASRNode(object):
     # =========================================================
 
     def audio_callback(self, msg: AudioData):
-        """VAD が ON の間だけ音声バッファに貯める。"""
+        """VAD が True の間だけ音声をバッファに貯める。"""
         if not self.current_vad:
             return
 
-        # AudioData.data は bytes → int16 → float32[-1,1] に変換
         data = np.frombuffer(msg.data, dtype=np.int16)
+        if data.size == 0:
+            return
+
         self.segment_buffer.append(data)
         self.segment_samples += data.shape[0]
 
     def vad_callback(self, msg: Bool):
-        """VAD の ON/OFF で区間を切って、OFF になった瞬間に ASR する。"""
+        """
+        VAD の ON/OFF で区間を切り、True→False の立ち下がりで ASR を走らせる。
+        """
         self.prev_vad = self.current_vad
         self.current_vad = bool(msg.data)
 
-        # 立ち下がり (True → False): 発話区間の終了
-        if self.prev_vad and not self.current_vad:
-            rospy.loginfo(
-                "FasterWhisperASRNode: VAD OFF, finalizing segment (%d samples).",
-                self.segment_samples,
-            )
-            self.finalize_segment()
-
-        # 立ち上がり (False → True): 新しい区間の開始
+        # 立ち上がり: 新しい区間を開始
         if (not self.prev_vad) and self.current_vad:
             rospy.loginfo("FasterWhisperASRNode: VAD ON, start new segment.")
             self.segment_buffer = []
             self.segment_samples = 0
 
+        # 立ち下がり: 発話区間の終了 → ASR 実行
+        if self.prev_vad and (not self.current_vad):
+            rospy.loginfo(
+                "FasterWhisperASRNode: VAD OFF, finalize segment (%d samples).",
+                self.segment_samples,
+            )
+            self.finalize_segment()
+
     # =========================================================
-    # ASR 実行
+    # セグメント処理
     # =========================================================
 
     def finalize_segment(self):
-        """現在の segment_buffer を 1 発話として ASR にかける。"""
+        """現在のバッファを 1 発話として ASR にかける。"""
         if self.segment_samples <= 0 or len(self.segment_buffer) == 0:
             rospy.loginfo("FasterWhisperASRNode: empty segment, skip.")
+            self.segment_buffer = []
+            self.segment_samples = 0
             return
 
         duration_sec = float(self.segment_samples) / float(self.sample_rate)
@@ -183,15 +185,14 @@ class FasterWhisperASRNode(object):
         if duration_sec > self.max_segment_duration:
             rospy.logwarn(
                 "FasterWhisperASRNode: long segment (%.2f sec). "
-                "You may want to check VAD settings.",
+                "Check your VAD parameters.",
                 duration_sec,
             )
 
         audio_int16 = np.concatenate(self.segment_buffer, axis=0)
-
-        # faster-whisper は int16 も受け付けるが、明示的に float32[-1,1] にしておく
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
+        # === Whisper 呼び出し ===
         try:
             segments, info = self.model.transcribe(
                 audio=audio_float32,
@@ -202,14 +203,13 @@ class FasterWhisperASRNode(object):
                 patience=1.0,
                 length_penalty=1.0,
                 initial_prompt=self.initial_prompt,
-                hotwords=self.hotwords,  # サポートされていない場合は例外になることがある
+                hotwords=self.hotwords,          # 対応していない環境だと TypeError
                 without_timestamps=True,
             )
         except TypeError:
-            # hotwords が使えないバージョンの faster-whisper 用 fallback
             rospy.logwarn(
-                "FasterWhisperASRNode: 'hotwords' not supported by this "
-                "faster-whisper version. Falling back without hotwords."
+                "FasterWhisperASRNode: 'hotwords' not supported, "
+                "retrying without it."
             )
             segments, info = self.model.transcribe(
                 audio=audio_float32,
@@ -223,36 +223,30 @@ class FasterWhisperASRNode(object):
                 without_timestamps=True,
             )
 
-        # segments は generator のこともあるのでリスト化
         segments = list(segments)
-
         if not segments:
             rospy.loginfo("FasterWhisperASRNode: no text recognized.")
             self.segment_buffer = []
             self.segment_samples = 0
             return
 
-        # --- テキスト結合 (スペースを挟む & 正規化) ---
-        texts: List[str] = []
+        # --- テキスト結合（スペース区切り & 正規化） ---
+        texts = []
         for seg in segments:
             if seg.text:
                 texts.append(seg.text.strip())
 
         text = " ".join(texts)
-        # 余計なスペースを 1 個に
-        text = " ".join(text.split())
+        text = " ".join(text.split())  # 余分なスペースを 1 個に
 
-        # GPSR 向けの補正 (livingroom -> living room など)
+        # --- GPSR 用の誤認識補正 ---
         text = self.apply_gpsr_corrections(text)
 
-        # --- 簡易 confidence 計算 ---
-        # faster-whisper の Segment には avg_logprob があるので、
-        # ここではその exp の平均を「ざっくり信頼度」として出す。
+        # --- confidence のざっくり計算 ---
         avg_logprobs = [s.avg_logprob for s in segments if hasattr(s, "avg_logprob")]
         if avg_logprobs:
             conf = float(np.exp(np.mean(avg_logprobs)))
         else:
-            # 情報がなければ 0.0〜1.0 の中間値とする
             conf = 0.5
 
         rospy.loginfo(
@@ -264,20 +258,32 @@ class FasterWhisperASRNode(object):
         self.pub_text.publish(String(data=text))
         self.pub_conf.publish(Float32(data=conf))
 
-        # バッファをクリア
+        # バッファクリア
         self.segment_buffer = []
         self.segment_samples = 0
 
     # =========================================================
-    # 認識結果の簡易補正 (GPSR向け)
+    # 認識結果の補正
     # =========================================================
 
     def apply_gpsr_corrections(self, text: str) -> str:
         """
-        GPSR コマンドでよく出そうな誤認識を簡易的に補正する。
-        （実際にはログを見ながらどんどん増やしていく想定）
+        GPSR コマンド向けの誤認識補正。
+        - 自動生成辞書 CORRECTIONS をまず適用
+        - それでも足りない典型的なミスは手書き辞書で補完
         """
-        corrections = {
+        fixed = text
+
+        # 1) 自動生成辞書（corrections_candidates.py）を適用
+        for wrong, right in CORRECTIONS.items():
+            if not wrong:
+                continue
+            fixed = fixed.replace(wrong, right)
+            # 先頭だけ大文字のパターンも一応補正
+            fixed = fixed.replace(wrong.capitalize(), right.capitalize())
+
+        # 2) ベースラインの手書き補正（必要に応じて拡張）
+        base_corrections = {
             # 部屋・家具
             "livingroom": "living room",
             "livin room": "living room",
@@ -300,11 +306,9 @@ class FasterWhisperASRNode(object):
             "cleaning supllies": "cleaning supplies",
         }
 
-        fixed = text
-        for wrong, right in corrections.items():
+        for wrong, right in base_corrections.items():
             fixed = fixed.replace(wrong, right)
-            # 先頭大文字のパターンも軽く対応
-            fixed = fixed.replace(wrong.capitalize(), right)
+            fixed = fixed.replace(wrong.capitalize(), right.capitalize())
 
         return fixed
 
