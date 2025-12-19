@@ -45,8 +45,8 @@ WORKDIR ${CATKIN_WS}
 COPY src/hsr_audio_pipeline ${CATKIN_WS}/src/hsr_audio_pipeline
 
 # === ワークスペースビルド ===
-RUN . /opt/ros/noetic/setup.sh \
- && catkin_make
+#RUN . /opt/ros/noetic/setup.sh \
+# && catkin_make
 
 # === シェル起動時の環境設定 ===
 RUN echo "source /opt/ros/noetic/setup.bash" >> /home/${USER_NAME}/.bashrc \
