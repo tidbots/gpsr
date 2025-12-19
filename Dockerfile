@@ -39,6 +39,10 @@ RUN apt-get update && apt-get install -y \
 # pip は後で Whisper / VAD 用にも使える
 RUN pip3 install --no-cache-dir --upgrade pip
 
+# 依存パッケージインストールのあとあたり
+RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir torch torchaudio
+ 
 # === catkin ワークスペース作成 ===
 ENV CATKIN_WS=/hsr_ws
 RUN mkdir -p ${CATKIN_WS}/src
