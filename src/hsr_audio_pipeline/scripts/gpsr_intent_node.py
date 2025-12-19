@@ -1,326 +1,205 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-import rospy
+"""
+GPSR Intent node with vocabulary "snap" layer.
+- Subscribes: /asr/text (std_msgs/String)
+- Publishes :
+    /gpsr/normalized_text (std_msgs/String)  : snapped & normalized text
+    /gpsr/intent          (std_msgs/String)  : JSON-like dict of parsed intent/slots or {need_confirm: true}
+"""
 import json
 import re
+import unicodedata
+import rospy
 from std_msgs.msg import String
 
+NODE_NAME = "gpsr_intent_node"
 
-# === RoboCup@Home 用語彙（すべて小文字で比較） ===
+# === Fixed GPSR vocabulary (from user) ===
+NAMES = ['Adel','Angel','Axel','Charlie','Jane','Jules','Morgan','Paris','Robin','Simone']
+LOCATIONS = ['bed','bedside table','shelf','trashbin','dishwasher','potted plant','kitchen table','chairs','pantry','refrigerator','sink','cabinet','coatrack','desk','armchair','desk lamp','waste basket','tv stand','storage rack','lamp','side tables','sofa','bookshelf','entrance','exit']
+ROOMS = ['bedroom','kitchen','office','living room','bathroom']
+OBJECTS = ['juice pack','cola','milk','orange juice','tropical juice','red wine','iced tea','tennis ball','rubiks cube','baseball','soccer ball','dice','orange','pear','peach','strawberry','apple','lemon','banana','plum','cornflakes','pringles','cheezit','cup','bowl','fork','plate','knife','spoon','chocolate jello','coffee grounds','mustard','tomato soup','tuna','strawberry jello','spam','sugar','cleanser','sponge']
+CATEGORIES = [('drink','drinks'), ('toy','toys'), ('fruit','fruits'), ('snack','snacks'), ('dish','dishes'), ('food','food'), ('cleaning supply','cleaning supplies')]
 
-NAMES = [
-    "adel", "angel", "axel", "charlie", "jane", "jules",
-    "morgan", "paris", "robin", "simone",
+CATEGORY_SINGULARS = [s for s,_ in CATEGORIES]
+CATEGORY_PLURALS   = [p for _,p in CATEGORIES]
+CATEGORY_ALL       = CATEGORY_SINGULARS + CATEGORY_PLURALS
+
+VOCAB_PHRASES = sorted(set(NAMES + LOCATIONS + ROOMS + OBJECTS + CATEGORY_ALL), key=lambda x: -len(x))
+
+def normalize_text(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s).lower()
+    s = re.sub(r"[^a-z0-9\s'-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def dl_distance(a: str, b: str) -> int:
+    # Simple Damerau–Levenshtein distance
+    d = {}
+    len_a, len_b = len(a), len(b)
+    for i in range(-1, len_a+1):
+        d[(i, -1)] = i+1
+    for j in range(-1, len_b+1):
+        d[(-1, j)] = j+1
+    for i in range(len_a):
+        for j in range(len_b):
+            cost = 0 if a[i] == b[j] else 1
+            d[(i, j)] = min(
+                d[(i-1, j)] + 1,
+                d[(i, j-1)] + 1,
+                d[(i-1, j-1)] + cost
+            )
+            if i and j and a[i] == b[j-1] and a[i-1] == b[j]:
+                d[(i, j)] = min(d[(i, j)], d[(i-2, j-2)] + cost)
+    return d[(len_a-1, len_b-1)]
+
+def snap_phrase_to_vocab(phrase: str, vocab_phrases, rel_thresh=0.34) -> str:
+    p0 = phrase.strip().lower()
+    best = (p0, 1.0)
+    for v in vocab_phrases:
+        dist = dl_distance(p0, v)
+        rel = dist / float(max(1, len(v)))
+        if rel < best[1]:
+            best = (v, rel)
+    return best[0] if best[1] <= rel_thresh else p0
+
+def vocab_snap_text(text: str) -> str:
+    """
+    Snap likely-misspelled words to the known competition vocabulary.
+    Handles multi-word phrases (e.g., 'bed side table' -> 'bedside table'),
+    and common confusions ('foot' -> 'food', 'dish washer' -> 'dishwasher').
+    """
+    t = " " + normalize_text(text) + " "
+    # quick common fixes
+    t = t.replace(" foot ", " food ").replace(" dish washer ", " dishwasher ")
+    words = t.split()
+    # greedy left-to-right n-gram snapping (max 4-gram)
+    i = 0
+    out = []
+    while i < len(words):
+        snapped = None
+        best_len = 1
+        for n in range(4, 0, -1):
+            if i + n > len(words):
+                continue
+            span = " ".join(words[i:i+n])
+            candidate = snap_phrase_to_vocab(span, VOCAB_PHRASES, rel_thresh=0.34)
+            if candidate in VOCAB_PHRASES:
+                snapped = candidate
+                best_len = n
+                break
+        out.append(snapped if snapped else words[i])
+        i += best_len
+    t2 = " ".join(out)
+    t2 = re.sub(r"\s+", " ", t2).strip()
+    return t2
+
+# === Pattern set for common GPSR utterances ===
+GRAMMARS = [
+    # tell me how many X there are on Y
+    ("count_on",
+     re.compile(r"\btell me how many (?P<cat>\w+(?: \w+)*) (?:there are |there're |are )?on (?:the )?(?P<loc>.+)$")),
+
+    # bring/fetch object from source to me
+    ("bring_from_to_me",
+     re.compile(r"\b(bring|fetch|get) (?:me )?(?:a |an |the )?(?P<obj>.+?) from (?:the )?(?P<src>.+?) (?:to|into|onto)? (?:me|here)$")),
+
+    # fetch category (implicit)
+    ("fetch_category",
+     re.compile(r"\b(fetch|get|bring) (?:me )?(?:some )?(?P<cat>.+)$")),
+
+    # navigate then look for and give
+    ("navigate_look_give",
+     re.compile(r"\bnavigate to (?:the )?(?P<loc>.+?) then look for (?:a |an |the )?(?P<obj>.+?) and (?:grasp|pick) it and (?:give|deliver) it to (?:the )?(?P<who>.+)$")),
+
+    # tell the gesture of the person at A to the person at B
+    ("tell_gesture",
+     re.compile(r"\btell (?:me )?the gesture of (?:the )?person at (?:the )?(?P<src>.+?) to (?:the )?person at (?:the )?(?P<dst>.+)$")),
+
+    # tell the name of the person at A to the person at B
+    ("tell_name",
+     re.compile(r"\btell (?:me )?the name of (?:the )?person at (?:the )?(?P<src>.+?) to (?:the )?person at (?:the )?(?P<dst>.+)$")),
+
+    # tell me how many people in the ROOM are wearing X
+    ("count_people_wearing",
+     re.compile(r"\btell me how many people in (?:the )?(?P<room>.+?) are wearing (?P<what>.+)$")),
 ]
 
-LOCATIONS = [
-    "bed", "bedside table", "shelf", "trashbin", "dishwasher", "potted plant",
-    "kitchen table", "chairs", "pantry", "refrigerator", "sink", "cabinet",
-    "coatrack", "desk", "armchair", "desk lamp", "waste basket", "tv stand",
-    "storage rack", "lamp", "side tables", "sofa", "bookshelf",
-    "entrance", "exit",
-]
+def best_category_token(s: str):
+    s_norm = s.strip().lower()
+    for c in CATEGORY_ALL:
+        if s_norm == c:
+            return c
+    for c in CATEGORY_ALL:
+        if c in s_norm:
+            return c
+    return snap_phrase_to_vocab(s_norm, CATEGORY_ALL, rel_thresh=0.34)
 
-PICKABLE_LOCATIONS = [
-    "bed", "bedside table", "shelf", "dishwasher", "kitchen table", "pantry",
-    "refrigerator", "sink", "cabinet", "desk", "tv stand", "storage rack",
-    "side tables", "sofa", "bookshelf",
-]
+def best_location_phrase(s: str):
+    return snap_phrase_to_vocab(s, LOCATIONS + ROOMS, rel_thresh=0.34)
 
-ROOMS = ["bedroom", "kitchen", "office", "living room", "bathroom"]
+def best_object_phrase(s: str):
+    return snap_phrase_to_vocab(s, OBJECTS, rel_thresh=0.34)
 
-OBJECTS = [
-    "juice pack", "cola", "milk", "orange juice", "tropical juice", "red wine",
-    "iced tea", "tennis ball", "rubiks cube", "baseball", "soccer ball", "dice",
-    "orange", "pear", "peach", "strawberry", "apple", "lemon", "banana", "plum",
-    "cornflakes", "pringles", "cheezit", "cup", "bowl", "fork", "plate", "knife",
-    "spoon", "chocolate jello", "coffee grounds", "mustard", "tomato soup",
-    "tuna", "strawberry jello", "spam", "sugar", "cleanser", "sponge",
-]
-
-CATEGORIES = {
-    "drink": ["drinks"],
-    "toy": ["toys"],
-    "fruit": ["fruits"],
-    "snack": ["snacks"],
-    "dish": ["dishes"],
-    "food": ["food"],  # 単複同形
-    "cleaning supply": ["cleaning supplies"],
-}
-
-
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
-
-
-def find_first_match(text: str, candidates):
+def interpret(text: str):
     """
-    text に含まれている candidates（単語またはフレーズ）のうち
-    一番左に出現するものを返す（見つからなければ ""）。
+    Return (intent, slots, confidence, snapped_text)
     """
-    text_l = text.lower()
-    best = ""
-    best_pos = len(text_l) + 1
-    for c in candidates:
-        pos = text_l.find(c)
-        if pos != -1 and pos < best_pos:
-            best = c
-            best_pos = pos
-    return best
+    t = vocab_snap_text(text)
+    for intent, pat in GRAMMARS:
+        m = pat.search(t)
+        if not m:
+            continue
+        slots = {k: v.strip() for k, v in m.groupdict().items() if v}
+        conf = 0.0
+        if intent == "count_on":
+            slots["category"] = best_category_token(slots.pop("cat", ""))
+            slots["location"] = best_location_phrase(slots.pop("loc", ""))
+        elif intent == "bring_from_to_me":
+            slots["object"] = best_object_phrase(slots.pop("obj", ""))
+            slots["source"] = best_location_phrase(slots.pop("src", ""))
+        elif intent == "fetch_category":
+            slots["category"] = best_category_token(slots.pop("cat", ""))
+        elif intent == "navigate_look_give":
+            slots["location"] = best_location_phrase(slots.pop("loc", ""))
+            slots["object"] = best_object_phrase(slots.pop("obj", ""))
+            slots["recipient"] = slots.pop("who", "lying person in the bathroom")
+        elif intent in ("tell_gesture", "tell_name"):
+            slots["source"] = best_location_phrase(slots.pop("src", ""))
+            slots["destination"] = best_location_phrase(slots.pop("dst", ""))
+        elif intent == "count_people_wearing":
+            slots["room"] = best_location_phrase(slots.pop("room", ""))
+            # "what" は自由語
+        # naive confidence: penalize out-of-vocab slot values
+        for v in slots.values():
+            if v not in VOCAB_PHRASES and v not in CATEGORY_ALL:
+                conf += 0.5
+        return intent, slots, max(conf, 0.0), t
+    return None, {}, 9e9, t
 
-
-def detect_category(text: str):
-    text_l = text.lower()
-    for singular, plurals in CATEGORIES.items():
-        if singular in text_l:
-            return singular, singular  # "food" など
-        for p in plurals:
-            if p in text_l:
-                return singular, p
-    return "", ""
-
-
-class GpsrIntentNode(object):
-    """
-    /asr/text に流れてくる音声認識結果（基本は英語）を受け取り、
-    /gpsr/intent に「意図っぽい情報」を JSON 文字列で publish するノード。
-
-    intent = {
-      "raw_text": <認識テキスト>,
-      "intent_type": "bring|guide|answer|other",
-      "slots": {
-        "object": "",
-        "object_category": "",
-        "source": "",
-        "source_room": "",
-        "destination": "",
-        "destination_room": "",
-        "person": "",
-        "person_at_source": "",
-        "person_at_destination": "",
-        "question_type": "",
-        "attribute": "",
-        "comparison": "",
-        "pose": "",
-        "count_target": "",
-      }
-    }
-    """
-
+class GPSRIntentNode(object):
     def __init__(self):
-        asr_topic = rospy.get_param("~asr_topic", "/asr/text")
-        intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
+        rospy.init_node(NODE_NAME)
+        self.pub_norm = rospy.Publisher("/gpsr/normalized_text", String, queue_size=10)
+        self.pub_intent = rospy.Publisher("/gpsr/intent", String, queue_size=10)
+        self.sub = rospy.Subscriber("/asr/text", String, self.cb, queue_size=10)
+        self.confirm_threshold = rospy.get_param("~confirm_threshold", 1.25)
+        rospy.loginfo("[%s] Ready. Subscribed to /asr/text", NODE_NAME)
 
-        self.pub_intent = rospy.Publisher(intent_topic, String, queue_size=10)
-        rospy.Subscriber(asr_topic, String, self.asr_callback)
-
-        rospy.loginfo("GpsrIntentNode: subscribing %s, publishing %s",
-                      asr_topic, intent_topic)
-
-    def asr_callback(self, msg: String):
-        text = msg.data.strip()
-        if not text:
-            return
-
-        rospy.loginfo("GpsrIntentNode: received ASR text: '%s'", text)
-
-        intent_type, slots = self.interpret_command(text)
-
-        intent = {
-            "raw_text": text,
-            "intent_type": intent_type,
-            "slots": slots,
-        }
-        intent_json = json.dumps(intent, ensure_ascii=False)
-        rospy.loginfo("GpsrIntentNode: intent=%s", intent_json)
-        self.pub_intent.publish(String(data=intent_json))
-
-    # === メインの解釈関数 ===
-
-    def interpret_command(self, text: str):
-        t_norm = normalize(text)
-
-        # 初期スロット
-        slots = {
-            "object": "",
-            "object_category": "",
-            "source": "",
-            "source_room": "",
-            "destination": "",
-            "destination_room": "",
-            "person": "",
-            "person_at_source": "",
-            "person_at_destination": "",
-            "question_type": "",
-            "attribute": "",
-            "comparison": "",
-            "pose": "",
-            "count_target": "",
-        }
-
-        intent_type = "other"
-
-        # --- 1) how many ... 系 ---
-        if "how many" in t_norm:
-            intent_type = "answer"
-
-            # 人数カウント（部屋／姿勢含む）
-            if "people in the" in t_norm or "persons in the" in t_norm or "lying persons" in t_norm:
-                slots["question_type"] = "count_people"
-                slots["count_target"] = "people"
-
-                # 部屋
-                room = find_first_match(t_norm, ROOMS)
-                if room:
-                    slots["source_room"] = room
-
-                # 姿勢
-                if "lying" in t_norm:
-                    slots["pose"] = "lying"
-
-                # 服装などの属性（"wearing ..." の後ろを全部）
-                m = re.search(r"wearing (.+)", t_norm)
-                if m:
-                    slots["attribute"] = "wearing " + m.group(1).strip()
-
-                return intent_type, slots
-
-            # 物体カテゴリのカウント
-            cat, cat_word = detect_category(t_norm)
-            if cat:
-                slots["question_type"] = "count_objects"
-                slots["object_category"] = cat
-                slots["count_target"] = cat_word
-                loc = find_first_match(t_norm, LOCATIONS)
-                if loc:
-                    slots["source"] = loc
-                return intent_type, slots
-
-        # --- 2) biggest/lightest ... cleaning supply on X ---
-        if ("biggest" in t_norm or "lightest" in t_norm) and "cleaning" in t_norm:
-            intent_type = "answer"
-            slots["question_type"] = "compare_objects"
-            slots["object_category"] = "cleaning supply"
-            slots["comparison"] = "biggest" if "biggest" in t_norm else "lightest"
-            loc = find_first_match(t_norm, LOCATIONS)
-            if loc:
-                slots["source"] = loc
-            return intent_type, slots
-
-        # --- 3) tell the gesture/name ... to the person at ... ---
-        if t_norm.startswith("tell the gesture of the person at"):
-            intent_type = "answer"
-            slots["question_type"] = "person_attribute"
-            slots["attribute"] = "gesture"
-
-            # "person at the X to the person at the Y"
-            src_loc = find_first_match(t_norm, LOCATIONS)
-            # "to the person at the Y" の Y を探す
-            # 一番後ろの location を destination とみなす
-            dst_loc = ""
-            for loc in LOCATIONS:
-                if "to the person at the " + loc in t_norm:
-                    dst_loc = loc
-                    break
-
-            if src_loc:
-                slots["source"] = src_loc
-                slots["person_at_source"] = f"person at the {src_loc}"
-            if dst_loc:
-                slots["destination"] = dst_loc
-                slots["person_at_destination"] = f"person at the {dst_loc}"
-            return intent_type, slots
-
-        if t_norm.startswith("tell the name of the person at"):
-            intent_type = "answer"
-            slots["question_type"] = "person_attribute"
-            slots["attribute"] = "name"
-
-            src_loc = find_first_match(t_norm, LOCATIONS)
-            dst_loc = ""
-            for loc in LOCATIONS:
-                if "to the person at the " + loc in t_norm:
-                    dst_loc = loc
-                    break
-
-            if src_loc:
-                slots["source"] = src_loc
-                slots["person_at_source"] = f"person at the {src_loc}"
-            if dst_loc:
-                slots["destination"] = dst_loc
-                slots["person_at_destination"] = f"person at the {dst_loc}"
-            return intent_type, slots
-
-        # --- 4) bring / fetch 系 ---
-        if t_norm.startswith("bring") or t_norm.startswith("fetch"):
-            intent_type = "bring"
-
-            # 物体 or カテゴリ
-            obj = find_first_match(t_norm, OBJECTS)
-            if obj:
-                slots["object"] = obj
-            cat, cat_word = detect_category(t_norm)
-            if cat and not slots["object"]:
-                slots["object_category"] = cat
-                slots["object"] = cat  # とりあえずカテゴリ名を入れておく
-
-            # source
-            src_loc = find_first_match(t_norm, PICKABLE_LOCATIONS)
-            if src_loc:
-                slots["source"] = src_loc
-
-            # destination
-            if "to me" in t_norm or "to the operator" in t_norm:
-                slots["destination"] = "operator"
-                slots["person"] = "operator"
-
-            return intent_type, slots
-
-        # --- 5) navigate ... then look for X and grasp it and give it to ... ---
-        if t_norm.startswith("navigate to"):
-            # とりあえず bring として扱う（ナビ＋ピック＆プレース）
-            intent_type = "bring"
-
-            # "navigate to the desk lamp"
-            nav_loc = ""
-            for loc in LOCATIONS:
-                if f"navigate to the {loc}" in t_norm or f"navigate to {loc}" in t_norm:
-                    nav_loc = loc
-                    break
-            if nav_loc:
-                slots["source"] = nav_loc  # 最初に向かう場所
-
-            # tuna などのオブジェクト
-            obj = find_first_match(t_norm, OBJECTS)
-            if obj:
-                slots["object"] = obj
-
-            # "lying person in the bathroom" のような表現
-            if "lying person" in t_norm and "bathroom" in t_norm:
-                slots["destination_room"] = "bathroom"
-                slots["pose"] = "lying"
-                slots["person"] = "lying person in the bathroom"
-                slots["person_at_destination"] = "lying person in the bathroom"
-
-            return intent_type, slots
-
-        # --- 6) それ以外の質問系 "tell me what/..." ---
-        if t_norm.startswith("tell me"):
-            intent_type = "answer"
-            # ここではとりあえず question_type などは空のまま返す
-            return intent_type, slots
-
-        # デフォルト
-        return intent_type, slots
-
-
-def main():
-    rospy.init_node("gpsr_intent_node")
-    node = GpsrIntentNode()
-    rospy.loginfo("GpsrIntentNode started.")
-    rospy.spin()
-
+    def cb(self, msg: String):
+        text = msg.data or ""
+        intent, slots, conf, snapped = interpret(text)
+        self.pub_norm.publish(String(data=snapped))
+        if intent and conf <= self.confirm_threshold:
+            payload = {"intent": intent, "slots": slots, "confidence": conf}
+        else:
+            payload = {"need_confirm": True, "heard": snapped}
+        self.pub_intent.publish(String(data=json.dumps(payload)))
 
 if __name__ == "__main__":
-    main()
+    try:
+        node = GPSRIntentNode()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
