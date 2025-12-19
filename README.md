@@ -23,6 +23,53 @@ apply_gpsr_corrections() の辞書を一緒に育てていきましょう。
 （「この単語が毎回こう間違う」という例を貼ってもらえれば、それ前提でガッと追加します。）
 
 
+✅ 現状完成している構成
+🎙️ 1) Audio → VAD → Faster-Whisper
+
+faster_whisper_asr_node.py は
+
+language = en
+
+beam search 設定強化
+
+GPSR 用語彙（initial_prompt & hotwords）
+
+スペース結合
+
+誤認識補正辞書
+を搭載して GPSR 特化 ASRとして最適化済み。
+
+🧠 2) /asr/text → GPSR パーサ
+
+gpsr_parser_node.py により
+
+全種テンプレート対応を目指した
+
+3 ステップ構造の kind + steps + fields JSON
+に落とし込む基盤完了。
+
+🔗 3) ROS1 トピック接続
+
+/audio → /asr/text → /gpsr/intent
+
+ROS1 Noetic + Docker で確実に動作。
+
+🎯 4) 「誤認識 → 補正 → パース」の一貫動作
+
+ASR → correction → parse で
+"Find a sponge in the living room then get it and bring it to me"
+が正しく解釈できるのを確認済み。
+
+今の構成が強い理由
+問題	対策
+英語認識精度	Whisper を en & beam_size=7 に
+ドメイン固有語彙	initial_prompt + hotwords
+単語連結	スペース結合・正規化
+特定誤り	apply_gpsr_corrections()
+多様な表現	GPSR パーサの best_match()
+テンプレート逆引き	kind+steps 構造化出力
+
+これは普通のロボカップ音声システムと比べて かなり高度です。
 
 
 ##　CommandGenerator
