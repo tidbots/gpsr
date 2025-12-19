@@ -28,6 +28,11 @@ catkin_install_python(
     scripts/asr_plain_echo.py
     scripts/gpsr_smach_node.py
     scripts/gpsr_parser_node.py
+    scripts/asr_plain_echo.py
+    scripts/gpsr_intent_echo.py
+    scripts/apply_corrections_example.py
+    scripts/corrections_candidates.py
+    scripts/gen_corrections.py    
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
