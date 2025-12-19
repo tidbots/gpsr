@@ -58,35 +58,46 @@ def split_into_clauses(text: str) -> List[str]:
     return clauses
 
 
-def best_match(token: str, candidates: List[str]) -> Optional[str]:
+def best_match(token, candidates):
     """
-    ASR ノイズを多少含んでいても、候補リストの中から最も近いものを返す。
-    - 完全一致
-    - 前方/後方一致
-    - 部分一致
+    候補リストから最適な語を返す。
+    - 完全一致 > 前後方一致 > 部分一致
+    - 同点の場合は「最長一致」を優先
     """
-    token = token.strip().lower()
     if not token:
         return None
 
-    # 完全一致
-    for c in candidates:
-        if token == c.lower():
-            return c
+    token = token.strip().lower()
 
-    # 前方/後方一致
+    # 1) 完全一致（最優先）
+    exact = [c for c in candidates if token == c.lower()]
+    if exact:
+        return max(exact, key=len)
+
+    scored = []
     for c in candidates:
-        cl = c.lower()
+        cl = c.lower().strip()
+        score = -1
+
+        # 2) 前方・後方一致（強い）
         if token.startswith(cl) or cl.startswith(token):
-            return c
+            score = 80
 
-    # 部分一致
-    for c in candidates:
-        cl = c.lower()
+        # 3) 部分一致（弱い）
         if token in cl or cl in token:
-            return c
+            score = max(score, 60)
 
-    return None
+        if score >= 0:
+            # (score, length, value)
+            scored.append((score, len(cl), c))
+
+    if not scored:
+        return None
+
+    # スコア最大、同点なら文字列が長いもの（＝最長一致）
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return scored[0][2]
+
 
 
 # ================= 内部表現 =================
