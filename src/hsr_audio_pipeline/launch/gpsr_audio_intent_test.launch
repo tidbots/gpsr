@@ -27,6 +27,9 @@
     <param name="language" value="en" />
   </node>
 
+ <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py" name="gpsr_parser_node" output="screen" />
+
+
   <!-- GPSR Intent ノード -->
   <node pkg="hsr_audio_pipeline" type="gpsr_intent_node.py"
         name="gpsr_intent_node" output="screen">
