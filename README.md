@@ -3,6 +3,28 @@
 
 
 ## ToDo
+**未テスト**
+テスト（ASR→intentまで）：
+```
+roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
+```
+
+実行（SMACHまで）：
+```
+roslaunch hsr_audio_pipeline gpsr_run.launch
+```
+
+確認：
+```
+rostopic echo /gpsr/asr/text
+rostopic echo /gpsr/asr/utterance_end
+rostopic echo /gpsr/intent
+rostopic echo /gpsr/task_state
+rostopic echo /gpsr/result
+```
+
+
+
 **パラメータ他をハードコーティングしている**
 
 **initial_prompt に入れておくと良い単語の微調整**
