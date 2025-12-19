@@ -1,42 +1,108 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import rospy
+"""
+GPSR-ready Faster-Whisper ASR node (ROS1 / Noetic)
+
+Inputs:
+  - audio_common_msgs/AudioData (int16 PCM, mono, 16kHz assumed)
+  - std_msgs/Bool /vad/is_speech  (from silero_vad_node.py)
+
+Outputs:
+  - std_msgs/String  /gpsr/asr/raw_text
+  - std_msgs/String  /gpsr/asr/text          (corrected/normalized)
+  - std_msgs/Float32 /gpsr/asr/confidence
+  - std_msgs/Bool    /gpsr/asr/utterance_end (pulse True)
+
+Design goals for RoboCup@Home GPSR:
+  - Segment only on speech end (avoid partial/garbage intents)
+  - Pre-roll & post-roll to avoid clipping
+  - Correction dictionary always applied
+  - Robust to faster-whisper hotwords support differences
+"""
+
+import time
+import threading
+from typing import Deque, List, Optional
+
 import numpy as np
+import rospy
 from std_msgs.msg import String, Bool, Float32
 from audio_common_msgs.msg import AudioData
 from faster_whisper import WhisperModel
 
-# 自動生成した辞書をここから import する想定
-# 同じパッケージ / ディレクトリに corrections_candidates.py を置いてください
+# --- Auto-generated corrections dictionary (optional) ---
 try:
-    from corrections_candidates import CORRECTIONS
-except ImportError:
-    # まだ用意していない場合でも動くように、空 dict でフォールバック
+    from corrections_candidates import CORRECTIONS  # dict: wrong -> right
+except Exception:
     CORRECTIONS = {}
-    rospy.logwarn("faster_whisper_asr_node: corrections_candidates.py not found. "
-                  "CORRECTIONS is empty.")
+
+
+class RingBuffer:
+    """Simple ring buffer for int16 audio (per-sample)."""
+
+    def __init__(self, max_samples: int):
+        self.max_samples = max(0, int(max_samples))
+        self._buf = np.zeros((0,), dtype=np.int16)
+
+    def append(self, x: np.ndarray):
+        if self.max_samples <= 0:
+            return
+        if x.size == 0:
+            return
+        if x.dtype != np.int16:
+            x = x.astype(np.int16, copy=False)
+        self._buf = np.concatenate([self._buf, x])
+        if self._buf.size > self.max_samples:
+            self._buf = self._buf[-self.max_samples :]
+
+    def get(self) -> np.ndarray:
+        if self.max_samples <= 0 or self._buf.size == 0:
+            return np.zeros((0,), dtype=np.int16)
+        return self._buf.copy()
 
 
 class FasterWhisperASRNode(object):
     def __init__(self):
-        # === パラメータ ===
-        audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
-        vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
+        # --------------------------
+        # ROS params
+        # --------------------------
+        self.audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
+        self.vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
 
-        self.text_topic = rospy.get_param("~text_topic", "/asr/text")
-        self.conf_topic = rospy.get_param("~conf_topic", "/asr/confidence")
+        # Output topics (GPSR naming)
+        self.raw_text_topic = rospy.get_param("~raw_text_topic", "/gpsr/asr/raw_text")
+        self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
+        self.conf_topic = rospy.get_param("~conf_topic", "/gpsr/asr/confidence")
+        self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
 
         self.sample_rate = int(rospy.get_param("~sample_rate", 16000))
 
-        model_size = rospy.get_param("~model_size", "small")   # tiny, base, small, ...
-        device = rospy.get_param("~device", "cpu")
-        compute_type = rospy.get_param("~compute_type", "float32")
+        # Segment control
+        self.pre_roll_sec = float(rospy.get_param("~pre_roll_sec", 0.25))     # add before speech start
+        self.post_roll_sec = float(rospy.get_param("~post_roll_sec", 0.35))   # add after speech end
+        self.min_segment_sec = float(rospy.get_param("~min_segment_sec", 0.6))
+        self.max_segment_sec = float(rospy.get_param("~max_segment_sec", 18.0))
 
-        # GPSR は英語前提なのでデフォルトを en に
+        # Model options
+        model_size = rospy.get_param("~model_size", "small")  # tiny/base/small/medium/large-v2...
+        device = rospy.get_param("~device", "cpu")            # "cpu" or "cuda"
+        compute_type = rospy.get_param("~compute_type", "float32")  # "int8_float16" etc.
         self.language = rospy.get_param("~language", "en")
 
-        # === GPSR 用の語彙 ===
+        # Decoding options
+        self.beam_size = int(rospy.get_param("~beam_size", 7))
+        self.best_of = int(rospy.get_param("~best_of", 7))
+        self.without_timestamps = bool(rospy.get_param("~without_timestamps", True))
+
+        # Correction
+        self.enable_corrections = bool(rospy.get_param("~enable_corrections", True))
+
+        # --------------------------
+        # GPSR vocabulary prompt (hotwords-like)
+        # If you already have gpsr_vocab.py, you can later import it.
+        # Keep it here to make this node standalone & robust.
+        # --------------------------
         self.gpsr_names = [
             "Adel", "Angel", "Axel", "Charlie", "Jane",
             "Jules", "Morgan", "Paris", "Robin", "Simone",
@@ -49,9 +115,7 @@ class FasterWhisperASRNode(object):
             "storage rack", "lamp", "side tables", "sofa", "bookshelf",
             "entrance", "exit",
         ]
-        self.gpsr_rooms = [
-            "bedroom", "kitchen", "office", "living room", "bathroom",
-        ]
+        self.gpsr_rooms = ["bedroom", "kitchen", "office", "living room", "bathroom"]
         self.gpsr_objects = [
             "juice pack", "cola", "milk", "orange juice", "tropical juice",
             "red wine", "iced tea", "tennis ball", "rubiks cube", "baseball",
@@ -62,15 +126,10 @@ class FasterWhisperASRNode(object):
             "tuna", "strawberry jello", "spam", "sugar", "cleanser", "sponge",
         ]
         self.gpsr_categories = [
-            "drink", "drinks",
-            "toy", "toys",
-            "fruit", "fruits",
-            "snack", "snacks",
-            "dish", "dishes",
-            "food",
+            "drink", "drinks", "toy", "toys", "fruit", "fruits",
+            "snack", "snacks", "dish", "dishes", "food",
             "cleaning supply", "cleaning supplies",
         ]
-
         vocab_words = (
             self.gpsr_names
             + self.gpsr_locations
@@ -78,31 +137,34 @@ class FasterWhisperASRNode(object):
             + self.gpsr_objects
             + self.gpsr_categories
         )
-
-        # Whisper に「こういう単語が出やすい」と教えるための文脈
+        # Whisper prompt for biasing
         self.initial_prompt = " ".join(vocab_words)
-
-        # hotwords（対応していない faster-whisper もあるので try/except で扱う）
         self.hotwords = vocab_words
 
-        # --- セグメント長の制御 ---
-        self.min_segment_duration = float(
-            rospy.get_param("~min_segment_duration", 0.5)
-        )  # [sec] これより短い区間は無視
-        self.max_segment_duration = float(
-            rospy.get_param("~max_segment_duration", 15.0)
-        )  # [sec] 長すぎる場合は警告のみ
+        # --------------------------
+        # Internal state
+        # --------------------------
+        self._lock = threading.Lock()
 
-        # --- VAD 状態 & バッファ ---
+        # VAD state
         self.current_vad = False
         self.prev_vad = False
-        self.segment_buffer = []
+
+        # Segment buffers
+        self.segment_chunks: List[np.ndarray] = []
         self.segment_samples = 0
 
-        # === モデル読み込み ===
+        # Pre-roll ring buffer (always collecting)
+        self.pre_roll = RingBuffer(max_samples=int(self.pre_roll_sec * self.sample_rate))
+
+        # Finalize control (post-roll)
+        self.finalize_pending = False
+        self.finalize_deadline: float = 0.0  # wall time (time.time)
+
+        # Model
         rospy.loginfo(
-            "FasterWhisperASRNode: loading model '%s' on %s (%s)",
-            model_size, device, compute_type,
+            "FasterWhisperASRNode: loading model='%s' device=%s compute_type=%s",
+            model_size, device, compute_type
         )
         self.model = WhisperModel(
             model_size_or_path=model_size,
@@ -111,180 +173,196 @@ class FasterWhisperASRNode(object):
         )
         rospy.loginfo("FasterWhisperASRNode: model loaded.")
 
-        # === Publisher / Subscriber ===
+        # Publishers
+        self.pub_raw = rospy.Publisher(self.raw_text_topic, String, queue_size=10)
         self.pub_text = rospy.Publisher(self.text_topic, String, queue_size=10)
         self.pub_conf = rospy.Publisher(self.conf_topic, Float32, queue_size=10)
+        self.pub_end = rospy.Publisher(self.utt_end_topic, Bool, queue_size=10)
 
-        rospy.Subscriber(audio_topic, AudioData, self.audio_callback, queue_size=100)
-        rospy.Subscriber(vad_topic, Bool, self.vad_callback, queue_size=100)
+        # Subscribers
+        rospy.Subscriber(self.audio_topic, AudioData, self.audio_callback, queue_size=200)
+        rospy.Subscriber(self.vad_topic, Bool, self.vad_callback, queue_size=200)
+
+        # Timer to finalize after post-roll (keeps logic simple & reliable)
+        self.timer = rospy.Timer(rospy.Duration(0.02), self._timer_cb)  # 50Hz
 
         rospy.loginfo(
-            "FasterWhisperASRNode: audio_topic=%s vad_topic=%s language=%s",
-            audio_topic, vad_topic, self.language,
+            "FasterWhisperASRNode ready: audio=%s vad=%s out(text)=%s",
+            self.audio_topic, self.vad_topic, self.text_topic
         )
 
-    # =========================================================
-    # コールバック
-    # =========================================================
-
+    # --------------------------
+    # Callbacks
+    # --------------------------
     def audio_callback(self, msg: AudioData):
-        """VAD が True の間だけ音声をバッファに貯める。"""
-        if not self.current_vad:
-            return
-
         data = np.frombuffer(msg.data, dtype=np.int16)
         if data.size == 0:
             return
 
-        self.segment_buffer.append(data)
-        self.segment_samples += data.shape[0]
+        with self._lock:
+            # Always keep pre-roll
+            self.pre_roll.append(data)
+
+            # During speech OR while post-roll pending, collect into segment buffer
+            collecting = self.current_vad or (self.finalize_pending and time.time() < self.finalize_deadline)
+            if not collecting:
+                return
+
+            self.segment_chunks.append(data)
+            self.segment_samples += data.size
 
     def vad_callback(self, msg: Bool):
-        """
-        VAD の ON/OFF で区間を切り、True→False の立ち下がりで ASR を走らせる。
-        """
-        self.prev_vad = self.current_vad
-        self.current_vad = bool(msg.data)
+        with self._lock:
+            self.prev_vad = self.current_vad
+            self.current_vad = bool(msg.data)
 
-        # 立ち上がり: 新しい区間を開始
-        if (not self.prev_vad) and self.current_vad:
-            rospy.loginfo("FasterWhisperASRNode: VAD ON, start new segment.")
-            self.segment_buffer = []
+            # Speech start
+            if (not self.prev_vad) and self.current_vad:
+                rospy.loginfo("ASR: VAD ON -> start segment")
+                self.finalize_pending = False
+                self.segment_chunks = []
+                self.segment_samples = 0
+
+                # Seed with pre-roll so we don't clip the initial consonant
+                pre = self.pre_roll.get()
+                if pre.size > 0:
+                    self.segment_chunks.append(pre)
+                    self.segment_samples += pre.size
+
+            # Speech end
+            if self.prev_vad and (not self.current_vad):
+                # Start post-roll window; finalization occurs in timer callback.
+                self.finalize_pending = True
+                self.finalize_deadline = time.time() + max(0.0, self.post_roll_sec)
+                rospy.loginfo(
+                    "ASR: VAD OFF -> finalize pending (post_roll=%.2fs, samples=%d)",
+                    self.post_roll_sec, self.segment_samples
+                )
+
+    def _timer_cb(self, _evt):
+        # finalize after post_roll time passes
+        with self._lock:
+            if not self.finalize_pending:
+                return
+            if time.time() < self.finalize_deadline:
+                return
+            # finalize now
+            self.finalize_pending = False
+            chunks = self.segment_chunks
+            samples = self.segment_samples
+
+            # Clear buffers early to be robust to re-entrance
+            self.segment_chunks = []
             self.segment_samples = 0
 
-        # 立ち下がり: 発話区間の終了 → ASR 実行
-        if self.prev_vad and (not self.current_vad):
-            rospy.loginfo(
-                "FasterWhisperASRNode: VAD OFF, finalize segment (%d samples).",
-                self.segment_samples,
-            )
-            self.finalize_segment()
+        # Do ASR outside lock (heavy)
+        self._finalize_segment(chunks, samples)
 
-    # =========================================================
-    # セグメント処理
-    # =========================================================
-
-    def finalize_segment(self):
-        """現在のバッファを 1 発話として ASR にかける。"""
-        if self.segment_samples <= 0 or len(self.segment_buffer) == 0:
-            rospy.loginfo("FasterWhisperASRNode: empty segment, skip.")
-            self.segment_buffer = []
-            self.segment_samples = 0
+    # --------------------------
+    # Segment -> Whisper
+    # --------------------------
+    def _finalize_segment(self, chunks: List[np.ndarray], samples: int):
+        if samples <= 0 or not chunks:
+            rospy.loginfo("ASR: empty segment -> skip")
             return
 
-        duration_sec = float(self.segment_samples) / float(self.sample_rate)
-        if duration_sec < self.min_segment_duration:
-            rospy.loginfo(
-                "FasterWhisperASRNode: segment too short (%.2f sec), skip.",
-                duration_sec,
-            )
-            self.segment_buffer = []
-            self.segment_samples = 0
+        duration = float(samples) / float(self.sample_rate)
+        if duration < self.min_segment_sec:
+            rospy.loginfo("ASR: segment too short (%.2fs) -> skip", duration)
             return
+        if duration > self.max_segment_sec:
+            rospy.logwarn("ASR: segment long (%.2fs). Check VAD/hangover.", duration)
 
-        if duration_sec > self.max_segment_duration:
-            rospy.logwarn(
-                "FasterWhisperASRNode: long segment (%.2f sec). "
-                "Check your VAD parameters.",
-                duration_sec,
-            )
+        audio_int16 = np.concatenate(chunks, axis=0)
+        audio_f32 = audio_int16.astype(np.float32) / 32768.0
 
-        audio_int16 = np.concatenate(self.segment_buffer, axis=0)
-        audio_float32 = audio_int16.astype(np.float32) / 32768.0
+        # Whisper transcribe
+        raw_text, conf = self._transcribe(audio_f32)
 
-        # === Whisper 呼び出し ===
+        # Publish raw
+        raw_text_norm = " ".join(raw_text.strip().split())
+        self.pub_raw.publish(String(data=raw_text_norm))
+
+        # Apply corrections + normalize
+        text = raw_text_norm
+        if self.enable_corrections:
+            text = self.apply_gpsr_corrections(text)
+        text = " ".join(text.strip().split())
+
+        rospy.loginfo("ASR: raw='%s' -> text='%s' conf=%.3f dur=%.2fs",
+                      raw_text_norm, text, conf, duration)
+
+        # Publish corrected
+        self.pub_text.publish(String(data=text))
+        self.pub_conf.publish(Float32(data=float(conf)))
+
+        # Pulse utterance_end
+        self.pub_end.publish(Bool(data=True))
+
+    def _transcribe(self, audio_f32: np.ndarray) -> (str, float):
+        # Some faster-whisper builds don't support hotwords; fallback.
         try:
             segments, info = self.model.transcribe(
-                audio=audio_float32,
+                audio=audio_f32,
                 language=self.language,
                 task="transcribe",
-                beam_size=7,
-                best_of=7,
-                patience=1.0,
-                length_penalty=1.0,
+                beam_size=self.beam_size,
+                best_of=self.best_of,
                 initial_prompt=self.initial_prompt,
-                hotwords=self.hotwords,          # 対応していない環境だと TypeError
-                without_timestamps=True,
+                hotwords=self.hotwords,
+                without_timestamps=self.without_timestamps,
             )
         except TypeError:
-            rospy.logwarn(
-                "FasterWhisperASRNode: 'hotwords' not supported, "
-                "retrying without it."
-            )
+            rospy.logwarn("ASR: 'hotwords' not supported. Retry without hotwords.")
             segments, info = self.model.transcribe(
-                audio=audio_float32,
+                audio=audio_f32,
                 language=self.language,
                 task="transcribe",
-                beam_size=7,
-                best_of=7,
-                patience=1.0,
-                length_penalty=1.0,
+                beam_size=self.beam_size,
+                best_of=self.best_of,
                 initial_prompt=self.initial_prompt,
-                without_timestamps=True,
+                without_timestamps=self.without_timestamps,
             )
 
         segments = list(segments)
         if not segments:
-            rospy.loginfo("FasterWhisperASRNode: no text recognized.")
-            self.segment_buffer = []
-            self.segment_samples = 0
-            return
+            return "", 0.0
 
-        # --- テキスト結合（スペース区切り & 正規化） ---
         texts = []
-        for seg in segments:
-            if seg.text:
-                texts.append(seg.text.strip())
+        avg_logprobs = []
+        for s in segments:
+            if getattr(s, "text", ""):
+                texts.append(s.text.strip())
+            if hasattr(s, "avg_logprob"):
+                avg_logprobs.append(float(s.avg_logprob))
 
-        text = " ".join(texts)
-        text = " ".join(text.split())  # 余分なスペースを 1 個に
+        raw_text = " ".join(texts)
 
-        # --- GPSR 用の誤認識補正 ---
-        text = self.apply_gpsr_corrections(text)
-
-        # --- confidence のざっくり計算 ---
-        avg_logprobs = [s.avg_logprob for s in segments if hasattr(s, "avg_logprob")]
+        # very rough confidence from avg_logprob
         if avg_logprobs:
             conf = float(np.exp(np.mean(avg_logprobs)))
+            conf = float(np.clip(conf, 0.0, 1.0))
         else:
             conf = 0.5
 
-        rospy.loginfo(
-            "FasterWhisperASRNode: text='%s' (conf=%.3f, %.2fs, %d segments)",
-            text, conf, duration_sec, len(segments),
-        )
+        return raw_text, conf
 
-        # publish
-        self.pub_text.publish(String(data=text))
-        self.pub_conf.publish(Float32(data=conf))
-
-        # バッファクリア
-        self.segment_buffer = []
-        self.segment_samples = 0
-
-    # =========================================================
-    # 認識結果の補正
-    # =========================================================
-
+    # --------------------------
+    # Corrections
+    # --------------------------
     def apply_gpsr_corrections(self, text: str) -> str:
-        """
-        GPSR コマンド向けの誤認識補正。
-        - 自動生成辞書 CORRECTIONS をまず適用
-        - それでも足りない典型的なミスは手書き辞書で補完
-        """
         fixed = text
 
-        # 1) 自動生成辞書（corrections_candidates.py）を適用
+        # 1) auto dictionary (from corrections_candidates.py)
         for wrong, right in CORRECTIONS.items():
             if not wrong:
                 continue
             fixed = fixed.replace(wrong, right)
-            # 先頭だけ大文字のパターンも一応補正
             fixed = fixed.replace(wrong.capitalize(), right.capitalize())
 
-        # 2) ベースラインの手書き補正（必要に応じて拡張）
-        base_corrections = {
-            # 部屋・家具
+        # 2) baseline common fixes
+        base = {
+            # rooms / furniture
             "livingroom": "living room",
             "livin room": "living room",
             "bath room": "bathroom",
@@ -292,21 +370,21 @@ class FasterWhisperASRNode(object):
             "trash bin": "trashbin",
             "book shelf": "bookshelf",
             "books shelve": "bookshelf",
-            "kitchen tablee": "kitchen table",
             "refridgerator": "refrigerator",
-            # 物体
+            # objects
             "corn flakes": "cornflakes",
             "pringles chips": "pringles",
             "cheese it": "cheezit",
             "cheese itz": "cheezit",
             "rubik cube": "rubiks cube",
             "soccerball": "soccer ball",
-            # カテゴリ
+            # categories
             "cleaning supplys": "cleaning supplies",
             "cleaning supllies": "cleaning supplies",
+            # typical whisper slips
+            "past room": "bathroom",   # (optional) you can remove if you dislike
         }
-
-        for wrong, right in base_corrections.items():
+        for wrong, right in base.items():
             fixed = fixed.replace(wrong, right)
             fixed = fixed.replace(wrong.capitalize(), right.capitalize())
 
@@ -316,7 +394,7 @@ class FasterWhisperASRNode(object):
 def main():
     rospy.init_node("faster_whisper_asr_node")
     node = FasterWhisperASRNode()
-    rospy.loginfo("FasterWhisperASRNode started.")
+    rospy.loginfo("faster_whisper_asr_node started.")
     rospy.spin()
 
 
