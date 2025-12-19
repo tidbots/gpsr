@@ -8,6 +8,23 @@ COMMON_GPSR_CORRECTIONS の具体的な中身
 
 initial_prompt に入れておくと良い単語の微調整
 
+
+
+その上で、さっきの GPSR パーサノードも起動しておけば
+
+audio → VAD → faster_whisper_asr_node → /asr/text
+      → gpsr_parser_node             → /gpsr/intent
+
+
+まで一気通貫になります。
+
+この状態で実際の誤認識ログがたまってきたら、
+apply_gpsr_corrections() の辞書を一緒に育てていきましょう。
+（「この単語が毎回こう間違う」という例を貼ってもらえれば、それ前提でガッと追加します。）
+
+
+
+
 ##　CommandGenerator
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
