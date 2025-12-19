@@ -42,6 +42,9 @@ RUN pip3 install --no-cache-dir --upgrade pip
 # 依存パッケージインストールのあとあたり
 RUN pip3 install --no-cache-dir --upgrade pip \
  && pip3 install --no-cache-dir torch torchaudio
+ RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir "tokenizers<0.21" \
+ && pip3 install --no-cache-dir "faster-whisper<1.1.0"
  
 # === catkin ワークスペース作成 ===
 ENV CATKIN_WS=/hsr_ws
