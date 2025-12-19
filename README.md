@@ -485,6 +485,25 @@ python gen_corrections.py asr.log
 - （おまけ）apply_corrections_example.py … 生成した辞書をどう使うかのサンプル
 全部スタンドアロンな Python スクリプトで、ROS に依存しないので，Docker コンテナの中でそのまま動かせる
 
+## 使い方
+1. ログを集める
+``@
+rostopic echo /asr/text > asr.log
+```
+
+2. 辞書候補を生成する
+```
+python3 gen_corrections.py asr.log > corrections_candidates.py
+```
+
+3. corrections_candidates.py を開いて
+- 「これは明らかに正しい」「これは怪しい」を人間が確認
+- OKなものだけ CORRECTIONS として採用
+
+4. faster_whisper_asr_node.py の apply_gpsr_corrections() に統合
+5. 再度ログを取りながら、定期的に 1〜4 を回す
+
+
 
 
 # デバッグ
