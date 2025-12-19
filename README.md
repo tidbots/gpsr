@@ -2,6 +2,12 @@
 ロボットは、幅広く異なる能力を必要とする命令を理解し実行することが求められる。
 
 
+実際の音声（Whisper 経由）でよく出る誤認識のログをいくつか貼ってもらえれば、
+
+COMMON_GPSR_CORRECTIONS の具体的な中身
+
+initial_prompt に入れておくと良い単語の微調整
+
 ##　CommandGenerator
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
