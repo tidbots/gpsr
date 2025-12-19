@@ -2,12 +2,14 @@
 The robot is asked to understand and execute commands requiring a wide range of different
 abilities.
 
-**Main Goal:++ Execute three commands issued by the operator.
-Focus
+**Main Goal:** Execute three commands issued by the operator.
+
+## Focus
 Task planning, object/people detection and recognition, object feature recognition, object manipulation
-Setup
-• Locations:
-– Task location: The task takes place inside the Arena. Commands may require the
+
+##Setup
+- Locations:
+  – Task location: The task takes place inside the Arena. Commands may require the
 robot to leave the room. The Arena is in its nominal configuration for this task.
 – Start location: The robot starts outside the Arena. When the door opens, it must
 navigate towards the Instruction Point.
