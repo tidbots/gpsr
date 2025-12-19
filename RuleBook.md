@@ -88,13 +88,13 @@ The maximum time for this test is **7:00** minutes.
 
 
  
-Demonstrate a plan has been generated 3×100
-Solving the command 3×250
-Bonus Rewards
-Interleaved Task Bonus 200
-Penalties
-Using a custom operator 3×–20
-Request a rephrasing 6×–30
+ 3×100
+ 3×250
+
+ 200
+
+ 3×–20
+````````` 6×–30
 Bypassing speech recognition 3×–50
 Human assistance: will apply a percentage penalty according to similar penalties in
 other tests.
@@ -108,9 +108,17 @@ Total Score (excluding special penalties & standard bonuses) 1490
 | Action  | Score |
 | ------------- | ------------- |
 | Main Goal  |   |
-| Understand the spoken command  | 3×80  |
-| Understand the spoken command  | 3×80  |
-| Understand the spoken command  | 3×80  |
-| Understand the spoken command  | 3×80  |
-| Understand the spoken command  | 3×80  |
-| Understand the spoken command  | 3×80  |
+| Demonstrate a plan has been generated  | 3×80  |
+| Solving the command  | 3×100  |
+| Bonus Rewards  |   |
+| Interleaved Task Bonus  | 3×250  |
+| Penalties  |   |
+| Using a custom operator  | 3×-20  |
+| Request a rephrasing  | 6×-30  |
+| Bypassing speech recognition  | 3×-50  |
+| Human assistance: will apply a percentage penalty according to similar penalties in
+other tests.  | 3×-250  |
+| Special Penalties & Bonuses  |   |
+| Not attending (see sec. 3.8.1)  | -500  |
+| Using alternative start signal (see sec. 3.6.8)  | -100  |
+| Outstanding performance (see sec. 3.8.3)  | 149  |
