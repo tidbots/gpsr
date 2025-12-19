@@ -107,4 +107,4 @@ other tests.  | 3×-250  |
 | Using alternative start signal (see sec. 3.6.8)  | -100  |
 | Outstanding performance (see sec. 3.8.3)  | 149  |
 | ------------- | ------------- |
-Total Score (excluding special penalties & standard bonuses) 1490
+|Total Score (excluding special penalties & standard bonuses)| 1490|
