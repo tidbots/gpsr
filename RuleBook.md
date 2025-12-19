@@ -86,9 +86,8 @@ During the test:<br>
 The maximum time for this test is **7:00** minutes.
 
 
-Action Score
-Main Goal
-Understand the spoken command 3×80
+
+ 
 Demonstrate a plan has been generated 3×100
 Solving the command 3×250
 Bonus Rewards
@@ -106,7 +105,12 @@ Using alternative start signal (see sec. 3.6.8) –100
 Outstanding performance (see sec. 3.8.3) 149
 Total Score (excluding special penalties & standard bonuses) 1490
 
-| First Header  | Second Header |
+| Action  | Score |
 | ------------- | ------------- |
-| Content Cell  | Content Cell  |
-| Content Cell  | Content Cell  |
+| Main Goal  |   |
+| Understand the spoken command  | 3×80  |
+| Understand the spoken command  | 3×80  |
+| Understand the spoken command  | 3×80  |
+| Understand the spoken command  | 3×80  |
+| Understand the spoken command  | 3×80  |
+| Understand the spoken command  | 3×80  |
