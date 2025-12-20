@@ -142,6 +142,8 @@ class GpsrParserNode:
         "find_object_in_room": ("composite", "findObjInRoom"),
         "go_to_location": ("composite", "goToLoc"),
         "follow_person_to_dest": ("guide", "followPersonToDest"),
+        "tell_person_info": ("answer", "tellPersonInfoInRoom"),
+        "tell_person_info_from_loc_to_loc": ("answer", "tellPersonInfoFromLocToLoc"),
     }
 
     def __init__(self):
@@ -163,6 +165,11 @@ class GpsrParserNode:
         self._latest_text = ""
         self._latest_text_stamp = rospy.Time(0)
         self._latest_conf = None
+
+        # debounce duplicate publishes
+        self._last_pub_norm = ""
+        self._last_pub_wall = 0.0
+        self._debounce_sec = float(rospy.get_param("~debounce_same_text_sec", 0.8))
 
         vocab = self._load_vocab(self.vocab_yaml)
         # 重要：複合語優先（desk lamp が desk より先にマッチ）
@@ -286,7 +293,12 @@ class GpsrParserNode:
             return
 
         raw = _collapse_duplicated_sentence(self._latest_text)
-        rospy.loginfo("parse: %s", raw.lower())
+        norm = raw.lower().strip()
+        now_wall = time.time()
+        if norm and norm == self._last_pub_norm and (now_wall - self._last_pub_wall) < self._debounce_sec:
+            rospy.logwarn("gpsr_parser_node: debounce duplicate text (%.3fs) '%s'", (now_wall - self._last_pub_wall), norm)
+            return
+        rospy.loginfo("parse: %s", norm)
 
         try:
             parsed_obj = self.parser.parse(raw)
@@ -296,6 +308,9 @@ class GpsrParserNode:
 
         payload = self._coerce_to_v1(parsed_obj, raw)
         self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
+        # update debounce state
+        self._last_pub_norm = norm
+        self._last_pub_wall = now_wall
 
     def _coerce_to_v1(self, parsed_obj, raw_text: str):
         parsed = _safe_to_dict(parsed_obj)
@@ -440,6 +455,23 @@ class GpsrParserNode:
                 set_if_empty("person", args.get("name"))
                 set_if_empty("source_place", args.get("from_place"))
                 set_if_empty("destination_place", args.get("to_place"))
+            # tell_person_info → source_room / question_type / attribute
+            if action == "tell_person_info":
+                # e.g. person_info: "pose", room: "bathroom", location(optional)
+                set_if_empty("source_room", args.get("room"))
+                set_if_empty("question_type", "person_info")
+                set_if_empty("attribute", args.get("person_info"))
+                if args.get("location"):
+                    # if location is specified, treat as source_place hint
+                    set_if_empty("source_place", args.get("location"))
+
+            # tell_person_info_from_loc_to_loc → person_at_source/person_at_destination + question
+            if action == "tell_person_info_from_loc_to_loc":
+                set_if_empty("question_type", "person_info")
+                set_if_empty("attribute", args.get("person_info"))
+                set_if_empty("person_at_source", args.get("source_location"))
+                set_if_empty("person_at_destination", args.get("target_location"))
+
 
 
 def main():
