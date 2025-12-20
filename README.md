@@ -23,14 +23,7 @@ Silero VADでtorch.hubでmaster.zipを毎回ダウンロードしている<br>
           ├─ correction 辞書生成
           └─ 正規化テキスト出力
 ```
-```
-python3 tools/make_vocab_yaml.py \
-  names/names.md \
-  maps/room_names.md \
-  maps/location_names.md \
-  objects/objects.md \
-  hsr_audio_pipeline/config/vocab.yaml
-```
+
 
 
 ### 20 Dec.2025
@@ -65,7 +58,14 @@ rostopic echo /gpsr/result
 
 ~~**誤認識ログの収集と登録**~~
 ->ツールを作成した
-
+```
+python3 tools/make_vocab_yaml.py \
+  names/names.md \
+  maps/room_names.md \
+  maps/location_names.md \
+  objects/objects.md \
+  hsr_audio_pipeline/config/vocab.yaml
+```
 
 ## インストールとDockerコンテナの実行
 ```
