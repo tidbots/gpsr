@@ -13,12 +13,13 @@
     <param name="device" value="" />
   </node>
 
-  <!-- 任意: RMS monitor -->
+  <!-- 任意: RMS monitor 
   <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
     <param name="topic" value="/audio/audio" />
     <param name="sample_format" value="S16LE" />
     <param name="log_interval" value="50" />
   </node>
+-->
 
   <!-- =======================
        Silero VAD
