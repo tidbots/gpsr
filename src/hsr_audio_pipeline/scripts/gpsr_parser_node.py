@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import time
+import threading
 import yaml
 import rospy
 from std_msgs.msg import String, Bool, Float32
@@ -132,6 +133,9 @@ class GpsrParserNode:
         "talk_to_person_in_room": ("answer", "talkInfoToGestPrsInRoom"),
         "count_persons_in_room": ("answer", "countPrsInRoom"),
         "tell_object_property_on_place": ("answer", "tellObjPropOnPlcmt"),
+        "tell_category_property_on_place": ("answer", "tellCatPropOnPlcmt"),
+        "tell_person_info": ("answer", "tellPersonInfoInRoom"),
+        "tell_person_info_from_loc_to_loc": ("answer", "tellPersonInfoFromLocToLoc"),
         # guide/greet
         "guide_named_person_from_place_to_place": ("guide", "guideNameFromBeacToBeac"),
         "guide_person_to_dest": ("guide", "guidePersonToDest"),
@@ -142,8 +146,6 @@ class GpsrParserNode:
         "find_object_in_room": ("composite", "findObjInRoom"),
         "go_to_location": ("composite", "goToLoc"),
         "follow_person_to_dest": ("guide", "followPersonToDest"),
-        "tell_person_info": ("answer", "tellPersonInfoInRoom"),
-        "tell_person_info_from_loc_to_loc": ("answer", "tellPersonInfoFromLocToLoc"),
     }
 
     def __init__(self):
@@ -166,10 +168,11 @@ class GpsrParserNode:
         self._latest_text_stamp = rospy.Time(0)
         self._latest_conf = None
 
-        # debounce duplicate publishes
+        # debounce duplicated publishes (same normalized text within window)
+        self.debounce_same_text_sec = float(rospy.get_param("~debounce_same_text_sec", 0.8))
         self._last_pub_norm = ""
         self._last_pub_wall = 0.0
-        self._debounce_sec = float(rospy.get_param("~debounce_same_text_sec", 0.8))
+        self._pub_lock = threading.Lock()
 
         vocab = self._load_vocab(self.vocab_yaml)
         # 重要：複合語優先（desk lamp が desk より先にマッチ）
@@ -293,12 +296,15 @@ class GpsrParserNode:
             return
 
         raw = _collapse_duplicated_sentence(self._latest_text)
+        # debounce: skip same text arriving twice (ASR repeat / utterance_end double-fire)
         norm = raw.lower().strip()
         now_wall = time.time()
-        if norm and norm == self._last_pub_norm and (now_wall - self._last_pub_wall) < self._debounce_sec:
-            rospy.logwarn("gpsr_parser_node: debounce duplicate text (%.3fs) '%s'", (now_wall - self._last_pub_wall), norm)
-            return
-        rospy.loginfo("parse: %s", norm)
+        with self._pub_lock:
+            if self.debounce_same_text_sec > 0 and norm and norm == self._last_pub_norm and (now_wall - self._last_pub_wall) < self.debounce_same_text_sec:
+                rospy.logwarn("gpsr_parser_node: debounce skip (dt=%.3f, text='%s')", now_wall - self._last_pub_wall, norm)
+                return
+        
+        rospy.loginfo("parse: %s", raw.lower())
 
         try:
             parsed_obj = self.parser.parse(raw)
@@ -308,9 +314,6 @@ class GpsrParserNode:
 
         payload = self._coerce_to_v1(parsed_obj, raw)
         self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
-        # update debounce state
-        self._last_pub_norm = norm
-        self._last_pub_wall = now_wall
 
     def _coerce_to_v1(self, parsed_obj, raw_text: str):
         parsed = _safe_to_dict(parsed_obj)
@@ -375,6 +378,13 @@ class GpsrParserNode:
                 a["from_place"] = _place_to_name(a.get("from_place"))
             if "to_place" in a:
                 a["to_place"] = _place_to_name(a.get("to_place"))
+            # other location fields
+            if "location" in a:
+                a["location"] = _place_to_name(a.get("location"))
+            if "source_location" in a:
+                a["source_location"] = _place_to_name(a.get("source_location"))
+            if "target_location" in a:
+                a["target_location"] = _place_to_name(a.get("target_location"))
 
         return payload
 
@@ -450,28 +460,34 @@ class GpsrParserNode:
             if action == "go_to_location":
                 set_if_empty("source_room", args.get("room"))
 
-            # guide_named_person_from_place_to_place
-            if action == "guide_named_person_from_place_to_place":
-                set_if_empty("person", args.get("name"))
-                set_if_empty("source_place", args.get("from_place"))
-                set_if_empty("destination_place", args.get("to_place"))
-            # tell_person_info → source_room / question_type / attribute
+            # tell_category_property_on_place → answer: category property on place
+            if action == "tell_category_property_on_place":
+                set_if_empty("question_type", "category_property")
+                set_if_empty("comparison", args.get("comparison"))
+                set_if_empty("object_category", args.get("object_category"))
+                set_if_empty("source_place", args.get("place"))
+
+            # tell_person_info → answer: person info in room/location
             if action == "tell_person_info":
-                # e.g. person_info: "pose", room: "bathroom", location(optional)
-                set_if_empty("source_room", args.get("room"))
                 set_if_empty("question_type", "person_info")
                 set_if_empty("attribute", args.get("person_info"))
+                set_if_empty("source_room", args.get("room"))
+                # locationがあれば place に
                 if args.get("location"):
-                    # if location is specified, treat as source_place hint
                     set_if_empty("source_place", args.get("location"))
 
-            # tell_person_info_from_loc_to_loc → person_at_source/person_at_destination + question
+            # tell_person_info_from_loc_to_loc → answer: person info source_loc → target_loc
             if action == "tell_person_info_from_loc_to_loc":
                 set_if_empty("question_type", "person_info")
                 set_if_empty("attribute", args.get("person_info"))
                 set_if_empty("person_at_source", args.get("source_location"))
                 set_if_empty("person_at_destination", args.get("target_location"))
 
+            # guide_named_person_from_place_to_place
+            if action == "guide_named_person_from_place_to_place":
+                set_if_empty("person", args.get("name"))
+                set_if_empty("source_place", args.get("from_place"))
+                set_if_empty("destination_place", args.get("to_place"))
 
 
 def main():
