@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-gpsr_parser_node.py (ROS1 / Noetic)
-
-Sub:
-  - ~text_topic          (std_msgs/String)  default: /gpsr/asr/text
-  - ~utterance_end_topic (std_msgs/Bool)    default: /gpsr/asr/utterance_end
-  - ~confidence_topic    (std_msgs/Float32) default: /gpsr/asr/confidence (optional)
-
-Pub:
-  - ~intent_topic        (std_msgs/String)  default: /gpsr/intent   (JSON)
-
-This node:
-  - Triggers parse on utterance_end(True)
-  - Calls gpsr_parser.GpsrParser (requires 7 vocab args)
-  - Publishes fixed schema gpsr_intent_v1:
-      steps: [{action, args}] (legacy fields -> args)
-      slots: fixed keys with null when absent
-      extras.legacy_slots preserves original variable slots
-  - Robust: parser may return dict / JSON str / object; always normalizes to dict.
-
-Additions:
-  - greet_person_with_clothes_in_room -> slots.source_room, slots.attribute
-  - guide_person_to_dest (args empty) -> infer destination_place from raw_text
-  - take_object_from_place -> slots.source_place + (object_category or object)
-  - talk_to_person_in_room -> slots.destination_room + person(person_filter)
-"""
-
 import os
 import sys
 import json
+import yaml
+import rospy
 
-# ---- PATH FIX (CRITICAL) ----
+from std_msgs.msg import String, Bool, Float32
+
+# ---- PATH FIX ----
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-# Add "<pkg>/scripts" even when run via catkin devel wrapper
 try:
     import rospkg
     _rp = rospkg.RosPack()
@@ -47,15 +23,13 @@ try:
         sys.path.insert(0, _scripts_dir)
 except Exception:
     pass
-# -----------------------------
-
-import rospy
-from std_msgs.msg import String, Bool, Float32
+# ------------------
 
 from gpsr_parser import GpsrParser
 
 
 class GpsrParserNode:
+
     FIXED_SLOT_KEYS = [
         "object",
         "object_category",
@@ -74,405 +48,174 @@ class GpsrParserNode:
     ]
 
     def __init__(self):
-        # ---- params ----
+        # ===============================
+        # ROS params
+        # ===============================
         self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
         self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
         self.conf_topic = rospy.get_param("~confidence_topic", "/gpsr/asr/confidence")
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
-
-        self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 2.0))
-        self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))  # <0 disables gating
+        self.vocab_yaml = rospy.get_param("~vocab_yaml", None)
         self.lang = rospy.get_param("~lang", "en")
 
-        # ---- latest ASR caches ----
         self._latest_text = ""
-        self._latest_text_stamp = rospy.Time(0)
         self._latest_conf = None
-        self._latest_conf_stamp = rospy.Time(0)
+        self._latest_text_stamp = rospy.Time(0)
 
-        # ---- vocab defaults (override-able by params) ----
-        default_person_names = [
-            "Adel", "Angel", "Axel", "Charlie", "Jane",
-            "Jules", "Morgan", "Paris", "Robin", "Simone",
-        ]
+        # ===============================
+        # Load vocabulary
+        # ===============================
+        vocab = self._load_vocab(self.vocab_yaml)
 
-        default_room_names = [
-            "bedroom", "kitchen", "living room", "office", "bathroom"
-        ]
-
-        default_location_names = [
-            "bed", "bedside table", "shelf", "trashbin", "dishwasher", "potted plant",
-            "kitchen table", "chairs", "pantry", "refrigerator", "sink", "cabinet",
-            "coatrack", "desk", "armchair", "desk lamp", "waste basket", "tv stand",
-            "storage rack", "lamp", "side tables", "sofa", "bookshelf", "entrance", "exit",
-        ]
-
-        default_placement_location_names = [
-            "bed", "bedside table", "shelf", "dishwasher",
-            "kitchen table", "pantry", "refrigerator", "sink",
-            "cabinet", "desk", "tv stand", "storage rack",
-            "side tables", "sofa", "bookshelf",
-        ]
-
-        default_object_names = [
-            "juice pack", "cola", "milk", "orange juice", "tropical juice",
-            "red wine", "iced tea",
-            "tennis ball", "rubiks cube", "baseball", "soccer ball", "dice",
-            "orange", "pear", "peach", "strawberry", "apple", "lemon", "banana", "plum",
-            "cornflakes", "pringles", "cheezit",
-            "cup", "bowl", "fork", "plate", "knife", "spoon",
-            "chocolate jello", "coffee grounds", "mustard", "tomato soup",
-            "tuna", "strawberry jello", "spam", "sugar",
-            "cleanser", "sponge",
-        ]
-
-        default_cat_singular = [
-            "drink", "toy", "fruit", "snack", "dish", "food", "cleaning supply"
-        ]
-        default_cat_plural = [
-            "drinks", "toys", "fruits", "snacks", "dishes", "food", "cleaning supplies"
-        ]
-
-        person_names = rospy.get_param("~person_names", default_person_names)
-        location_names = rospy.get_param("~location_names", default_location_names)
-        placement_location_names = rospy.get_param("~placement_location_names", default_placement_location_names)
-        room_names = rospy.get_param("~room_names", default_room_names)
-        object_names = rospy.get_param("~object_names", default_object_names)
-        object_categories_plural = rospy.get_param("~object_categories_plural", default_cat_plural)
-        object_categories_singular = rospy.get_param("~object_categories_singular", default_cat_singular)
-
-        # For raw_text place inference
-        self._all_places = list(
-            set([s.lower().strip() for s in (location_names + placement_location_names) if isinstance(s, str)])
-        )
-
-        # ---- parser (requires 7 args) ----
+        # ===============================
+        # Build GPSR parser
+        # ===============================
         self.parser = GpsrParser(
-            person_names=person_names,
-            location_names=location_names,
-            placement_location_names=placement_location_names,
-            room_names=room_names,
-            object_names=object_names,
-            object_categories_plural=object_categories_plural,
-            object_categories_singular=object_categories_singular,
+            person_names=vocab["person_names"],
+            location_names=vocab["location_names"],
+            placement_location_names=vocab["placement_location_names"],
+            room_names=vocab["room_names"],
+            object_names=vocab["object_names"],
+            object_categories_plural=vocab["object_categories_plural"],
+            object_categories_singular=vocab["object_categories_singular"],
         )
 
-        # ---- pub/sub ----
+        self._all_places = vocab["location_names"]
+
+        # ===============================
+        # ROS I/O
+        # ===============================
         self.pub_intent = rospy.Publisher(self.intent_topic, String, queue_size=10)
         rospy.Subscriber(self.text_topic, String, self._on_text, queue_size=50)
-        rospy.Subscriber(self.utt_end_topic, Bool, self._on_utterance_end, queue_size=50)
+        rospy.Subscriber(self.utt_end_topic, Bool, self._on_utt_end, queue_size=50)
 
         try:
             rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)
         except Exception:
             pass
 
-        rospy.loginfo("gpsr_parser_node started: text=%s utt_end=%s -> intent=%s",
-                      self.text_topic, self.utt_end_topic, self.intent_topic)
+        rospy.loginfo("gpsr_parser_node ready (vocab=%s)",
+                      self.vocab_yaml if self.vocab_yaml else "internal defaults")
 
-    # ---------------- callbacks ----------------
-    def _on_text(self, msg: String):
-        self._latest_text = (msg.data or "")
+    # ==========================================================
+    # Vocabulary loader
+    # ==========================================================
+    def _load_vocab(self, yaml_path):
+        if yaml_path and os.path.exists(yaml_path):
+            rospy.loginfo("Loading GPSR vocab from YAML: %s", yaml_path)
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                y = yaml.safe_load(f)
+
+            names = y.get("names", [])
+            rooms = y.get("rooms", [])
+
+            location_names = []
+            placement_location_names = []
+
+            for loc in y.get("locations", []):
+                name = loc["name"]
+                location_names.append(name)
+                if loc.get("placement", False):
+                    placement_location_names.append(name)
+
+            object_names = []
+            cats_s = []
+            cats_p = []
+
+            for c in y.get("categories", []):
+                cats_s.append(c["singular"])
+                cats_p.append(c["plural"])
+                for o in c.get("objects", []):
+                    object_names.append(o.replace("_", " "))
+
+            return dict(
+                person_names=names,
+                room_names=rooms,
+                location_names=location_names,
+                placement_location_names=placement_location_names,
+                object_names=sorted(set(object_names)),
+                object_categories_singular=sorted(set(cats_s)),
+                object_categories_plural=sorted(set(cats_p)),
+            )
+
+        # ---------- fallback ----------
+        rospy.logwarn("vocab_yaml not set or not found → using built-in defaults")
+        return self._default_vocab()
+
+    def _default_vocab(self):
+        return dict(
+            person_names=["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"],
+            room_names=["bedroom", "kitchen", "living room", "office", "bathroom"],
+            location_names=["bed", "bedside table", "shelf", "trashbin", "dishwasher",
+                            "kitchen table", "pantry", "refrigerator", "sink", "cabinet",
+                            "desk", "tv stand", "storage rack", "side tables", "sofa", "bookshelf"],
+            placement_location_names=["bed", "bedside table", "shelf", "dishwasher",
+                                      "kitchen table", "pantry", "refrigerator", "sink",
+                                      "cabinet", "desk", "tv stand", "storage rack",
+                                      "side tables", "sofa", "bookshelf"],
+            object_names=["red wine", "milk", "cola", "juice", "sponge", "cleanser"],
+            object_categories_singular=["drink", "food", "cleaning supply"],
+            object_categories_plural=["drinks", "food", "cleaning supplies"],
+        )
+
+    # ==========================================================
+    # Callbacks
+    # ==========================================================
+    def _on_text(self, msg):
+        self._latest_text = msg.data.strip()
         self._latest_text_stamp = rospy.Time.now()
 
-    def _on_conf(self, msg: Float32):
-        self._latest_conf = float(msg.data)
-        self._latest_conf_stamp = rospy.Time.now()
+    def _on_conf(self, msg):
+        self._latest_conf = msg.data
 
-    def _on_utterance_end(self, msg: Bool):
-        if not bool(msg.data):
+    def _on_utt_end(self, msg):
+        if not msg.data or not self._latest_text:
             return
 
-        now = rospy.Time.now()
-        age = (now - self._latest_text_stamp).to_sec()
-        raw_text = (self._latest_text or "").strip()
-
-        if not raw_text:
-            rospy.logwarn("utterance_end received but no text cached.")
-            return
-        if age > self.max_text_age_sec:
-            rospy.logwarn("utterance_end received but text is stale (age=%.3fs): %r", age, raw_text)
-            return
-
-        if self.min_confidence >= 0.0 and self._latest_conf is not None:
-            if self._latest_conf < self.min_confidence:
-                payload = self._make_base_v1(raw_text)
-                payload["ok"] = False
-                payload["need_confirm"] = True
-                payload["error"] = "low_confidence"
-                payload["confidence"] = self._latest_conf
-                self._publish(payload)
-                return
-
-        rospy.loginfo("parse: %s", raw_text)
+        raw = self._latest_text
+        rospy.loginfo("parse: %s", raw)
 
         try:
-            parsed = self.parser.parse(raw_text)
+            parsed = self.parser.parse(raw)
         except Exception as e:
-            payload = self._make_base_v1(raw_text)
-            payload["ok"] = False
-            payload["need_confirm"] = True
-            payload["error"] = f"parser_exception: {e}"
-            payload["confidence"] = self._latest_conf
-            self._publish(payload)
+            rospy.logerr("parse failed: %s", e)
             return
 
-        payload_any = self._ensure_dict(parsed, raw_text)
-        payload_v1 = self._coerce_to_v1(payload_any, raw_text)
-        self._publish(payload_v1)
+        payload = self._coerce_to_v1(parsed, raw)
+        self._publish(payload)
 
-    # ---------------- helpers ----------------
-    def _ensure_dict(self, maybe, raw_text: str) -> dict:
-        if isinstance(maybe, dict):
-            return maybe
+    # ==========================================================
+    # Intent shaping
+    # ==========================================================
+    def _coerce_to_v1(self, parsed, raw_text):
+        if isinstance(parsed, str):
+            parsed = json.loads(parsed)
 
-        if isinstance(maybe, str):
-            s = maybe.strip()
-            if s.startswith("{") and s.endswith("}"):
-                try:
-                    return json.loads(s)
-                except Exception:
-                    pass
-
-        for meth in ("to_dict", "to_json_str", "to_json"):
-            if hasattr(maybe, meth):
-                try:
-                    out = getattr(maybe, meth)()
-                    if isinstance(out, dict):
-                        return out
-                    if isinstance(out, str):
-                        return json.loads(out)
-                except Exception:
-                    pass
-
-        if hasattr(maybe, "__dict__"):
-            d = dict(maybe.__dict__)
-            if d:
-                return d
-
-        return {
+        payload = {
             "schema": "gpsr_intent_v1",
-            "ok": False,
-            "need_confirm": True,
-            "intent_type": "other",
+            "ok": parsed.get("ok", True),
+            "need_confirm": parsed.get("need_confirm", False),
+            "intent_type": parsed.get("intent_type", "other"),
             "raw_text": raw_text,
-            "error": "parsed_value_not_convertible_to_dict",
-            "source": "parser",
-            "steps": [],
-            "slots": {},
-        }
-
-    def _make_base_v1(self, raw_text: str) -> dict:
-        return {
-            "schema": "gpsr_intent_v1",
-            "ok": True,
-            "need_confirm": False,
-            "intent_type": "other",
-            "raw_text": raw_text,
-            "normalized_text": self._normalize_text(raw_text),
+            "normalized_text": raw_text.lower(),
             "confidence": self._latest_conf,
             "source": "parser",
-            "command_kind": None,
-            "slots": {k: None for k in self.FIXED_SLOT_KEYS},
+            "command_kind": parsed.get("command_kind"),
             "steps": [],
-            "extras": {},
+            "slots": {k: None for k in self.FIXED_SLOT_KEYS},
+            "extras": {"legacy_slots": parsed.get("slots", {})},
             "context": {"lang": self.lang, "source": "parser"},
         }
 
-    def _normalize_steps(self, steps_legacy) -> list:
-        out = []
-        if not isinstance(steps_legacy, list):
-            return out
-        for st in steps_legacy:
-            if not isinstance(st, dict):
-                continue
-            action = st.get("action") or ""
-            if not action:
-                continue
-            if isinstance(st.get("args"), dict):
-                args = dict(st["args"])
-            elif isinstance(st.get("fields"), dict):
-                args = dict(st["fields"])
-            else:
-                args = {}
-            out.append({"action": action, "args": args})
-        return out
+        for s in parsed.get("steps", []):
+            payload["steps"].append({
+                "action": s["action"],
+                "args": s.get("args", s.get("fields", {}))
+            })
 
-    def _infer_intent_type(self, kind, steps_v1) -> str:
-        if isinstance(steps_v1, list) and len(steps_v1) >= 2:
-            return "composite"
-        k = (kind or "").lower()
-        actions = " ".join([(s.get("action", "") or "").lower() for s in (steps_v1 or [])])
-        s = (k + " " + actions).strip()
-        if any(w in s for w in ["guide", "escort", "lead"]):
-            return "guide"
-        if any(w in s for w in ["bring", "fetch", "deliver", "give", "takeobj", "bringme"]):
-            return "bring"
-        if any(w in s for w in ["tell", "answer", "question", "count", "describe", "prop", "talk"]):
-            return "answer"
-        if "find" in s:
-            return "find"
-        if any(w in s for w in ["place", "put"]):
-            return "place"
-        return "other"
+        return payload
 
-    def _best_place_from_text(self, raw_text: str):
-        if not raw_text:
-            return None
-        t = self._normalize_text(raw_text)
-        t_compact = t.replace(" ", "")
-
-        best = None
-        best_len = -1
-
-        for p in self._all_places:
-            if not p:
-                continue
-            if p in t and len(p) > best_len:
-                best = p
-                best_len = len(p)
-
-        for p in self._all_places:
-            if not p:
-                continue
-            pc = p.replace(" ", "")
-            if pc and pc in t_compact and len(p) > best_len:
-                best = p
-                best_len = len(p)
-
-        return best
-
-    def _extract_fixed_slots(self, steps_v1: list, legacy_slots: dict, raw_text: str = "") -> dict:
-        slots = {k: None for k in self.FIXED_SLOT_KEYS}
-
-        def set_if_empty(key, val):
-            if val is None:
-                return
-            if isinstance(val, str) and val.strip() == "":
-                return
-            if slots.get(key) is None:
-                slots[key] = val
-
-        for st in steps_v1:
-            action = (st.get("action") or "").lower()
-            args = st.get("args") or {}
-
-            # Q/A object property
-            if action in ("tell_object_property_on_place", "tellobjproponplcmt", "tell_object_property"):
-                set_if_empty("comparison", args.get("comparison"))
-                set_if_empty("source_place", args.get("place"))
-
-            # greet person with clothes in room -> source_room + attribute
-            if action in ("greet_person_with_clothes_in_room", "greetclothdscinrm"):
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("attribute", args.get("clothes_description") or args.get("clothes") or args.get("attribute"))
-
-            # go to location/room
-            if action in ("go_to_location", "goto_location", "go_to_room", "goto_room"):
-                set_if_empty("source_room", args.get("room") or args.get("location"))
-
-            # find object in room
-            if action in ("find_object_in_room", "findobjinroom"):
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category") or args.get("object_or_category"))
-
-            # NEW: take_object_from_place -> source_place + (category/object)
-            if action in ("take_object_from_place", "takeobjfromplcmt", "take_object_from_placement"):
-                set_if_empty("source_place", args.get("place") or args.get("source_place"))
-                oc = args.get("object_or_category") or args.get("object_category")
-                if oc:
-                    # まずカテゴリに寄せる（drink/food/cleaning supply など）
-                    set_if_empty("object_category", oc)
-                else:
-                    set_if_empty("object", args.get("object"))
-
-            # bring to operator
-            if action in ("bring_object_to_operator", "bringmeobjfromplcmt", "bring_to_operator"):
-                set_if_empty("object", args.get("object"))
-                set_if_empty("source_place", args.get("source_place") or args.get("place"))
-
-            # deliver to person in room
-            if action in ("deliver_object_to_person_in_room", "deliver_object_to_person", "give_object_to_person"):
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("person") or args.get("name") or args.get("person_filter"))
-                set_if_empty("object", args.get("object"))
-
-            # guide named person from/to
-            if action in ("guide_named_person_from_place_to_place", "guidenamefrombeactobeac"):
-                set_if_empty("person", args.get("name") or args.get("person"))
-                set_if_empty("source_place", args.get("from_place"))
-                set_if_empty("destination_place", args.get("to_place"))
-
-            # guide_person_to_dest (args empty) -> infer destination_place from raw_text
-            if action in ("guide_person_to_dest", "guide_person_to_destination"):
-                set_if_empty("destination_place", args.get("to_place") or args.get("destination_place") or args.get("place"))
-                if slots.get("destination_place") is None:
-                    set_if_empty("destination_place", self._best_place_from_text(raw_text))
-
-            # NEW: talk_to_person_in_room -> destination_room + person(person_filter)
-            if action in ("talk_to_person_in_room", "talkinfotogestprsinroom", "talk_to_person"):
-                # 会話対象がいる部屋なので destination_room に寄せる
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("person") or args.get("name") or args.get("person_filter"))
-                # talk内容は attribute に入れておくと後段で使いやすい
-                set_if_empty("attribute", args.get("talk"))
-
-            # place object
-            if action in ("place_object_on_place", "place_object", "put_object_on_place"):
-                set_if_empty("destination_place", args.get("place"))
-
-        # ---- fallback from legacy slots ----
-        if isinstance(legacy_slots, dict):
-            set_if_empty("object", legacy_slots.get("object"))
-            set_if_empty("object_category", legacy_slots.get("object_category") or legacy_slots.get("object_or_category"))
-            set_if_empty("source_room", legacy_slots.get("source_room") or legacy_slots.get("room"))
-            set_if_empty("source_place", legacy_slots.get("source_place") or legacy_slots.get("place") or legacy_slots.get("from_place"))
-            set_if_empty("destination_room", legacy_slots.get("destination_room") or legacy_slots.get("destination") or legacy_slots.get("room"))
-            set_if_empty("destination_place", legacy_slots.get("destination_place") or legacy_slots.get("to_place"))
-            set_if_empty("person", legacy_slots.get("person") or legacy_slots.get("name") or legacy_slots.get("person_filter"))
-            set_if_empty("comparison", legacy_slots.get("comparison"))
-            set_if_empty("attribute", legacy_slots.get("attribute"))
-            set_if_empty("question_type", legacy_slots.get("question_type"))
-
-        return slots
-
-    def _coerce_to_v1(self, payload: dict, raw_text: str) -> dict:
-        v1 = self._make_base_v1(raw_text)
-
-        v1["ok"] = bool(payload.get("ok", True))
-        v1["need_confirm"] = bool(payload.get("need_confirm", False))
-        v1["source"] = payload.get("source", "parser")
-        v1["confidence"] = payload.get("confidence", self._latest_conf)
-        v1["command_kind"] = payload.get("command_kind", payload.get("kind"))
-
-        steps_v1 = self._normalize_steps(payload.get("steps", []) or [])
-        v1["steps"] = steps_v1
-
-        given_intent = payload.get("intent_type")
-        if isinstance(given_intent, str) and given_intent.strip():
-            v1["intent_type"] = given_intent
-        else:
-            v1["intent_type"] = self._infer_intent_type(v1["command_kind"], steps_v1)
-
-        # keep raw/normalized first (used for destination inference)
-        v1["raw_text"] = payload.get("raw_text", raw_text)
-        v1["normalized_text"] = payload.get("normalized_text", self._normalize_text(v1["raw_text"]))
-
-        legacy_slots = payload.get("slots", {}) if isinstance(payload.get("slots"), dict) else {}
-        v1["slots"] = self._extract_fixed_slots(steps_v1, legacy_slots, raw_text=v1["raw_text"])
-        v1["extras"] = {"legacy_slots": legacy_slots}
-
-        v1["schema"] = "gpsr_intent_v1"
-        return v1
-
-    @staticmethod
-    def _normalize_text(s: str) -> str:
-        s = (s or "").strip()
-        s = " ".join(s.split())
-        return s.lower()
-
-    def _publish(self, payload: dict):
+    def _publish(self, payload):
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         self.pub_intent.publish(msg)
@@ -480,8 +223,7 @@ class GpsrParserNode:
 
 def main():
     rospy.init_node("gpsr_parser_node")
-    _ = GpsrParserNode()
-    rospy.loginfo("gpsr_parser_node running (gpsr_intent_v1 fixed schema).")
+    GpsrParserNode()
     rospy.spin()
 
 
