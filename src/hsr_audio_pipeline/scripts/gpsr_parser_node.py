@@ -21,9 +21,11 @@ This node:
       extras.legacy_slots preserves original variable slots
   - Robust: parser may return dict / JSON str / object; always normalizes to dict.
 
-Additions (2025-12):
-  - Map greet_person_with_clothes_in_room -> slots.source_room, slots.attribute
-  - Map guide_person_to_dest (args empty) -> infer destination_place from raw_text
+Additions:
+  - greet_person_with_clothes_in_room -> slots.source_room, slots.attribute
+  - guide_person_to_dest (args empty) -> infer destination_place from raw_text
+  - take_object_from_place -> slots.source_place + (object_category or object)
+  - talk_to_person_in_room -> slots.destination_room + person(person_filter)
 """
 
 import os
@@ -54,7 +56,6 @@ from gpsr_parser import GpsrParser
 
 
 class GpsrParserNode:
-    # fixed slots for gpsr_intent_v1
     FIXED_SLOT_KEYS = [
         "object",
         "object_category",
@@ -89,7 +90,7 @@ class GpsrParserNode:
         self._latest_conf = None
         self._latest_conf_stamp = rospy.Time(0)
 
-        # ---- vocab (defaults; can be overridden by ROS params) ----
+        # ---- vocab defaults (override-able by params) ----
         default_person_names = [
             "Adel", "Angel", "Axel", "Charlie", "Jane",
             "Jules", "Morgan", "Paris", "Robin", "Simone",
@@ -132,7 +133,6 @@ class GpsrParserNode:
             "drinks", "toys", "fruits", "snacks", "dishes", "food", "cleaning supplies"
         ]
 
-        # read ROS params if provided
         person_names = rospy.get_param("~person_names", default_person_names)
         location_names = rospy.get_param("~location_names", default_location_names)
         placement_location_names = rospy.get_param("~placement_location_names", default_placement_location_names)
@@ -141,15 +141,12 @@ class GpsrParserNode:
         object_categories_plural = rospy.get_param("~object_categories_plural", default_cat_plural)
         object_categories_singular = rospy.get_param("~object_categories_singular", default_cat_singular)
 
-        # Keep vocab for slot補完（raw_textからplace推定などに使う）
-        self._location_names = location_names
-        self._placement_location_names = placement_location_names
-        # place候補（lower/strip済み、重複除去）
+        # For raw_text place inference
         self._all_places = list(
             set([s.lower().strip() for s in (location_names + placement_location_names) if isinstance(s, str)])
         )
 
-        # ---- build parser (REQUIRED ARGS) ----
+        # ---- parser (requires 7 args) ----
         self.parser = GpsrParser(
             person_names=person_names,
             location_names=location_names,
@@ -160,12 +157,11 @@ class GpsrParserNode:
             object_categories_singular=object_categories_singular,
         )
 
-        # ---- ROS pub/sub ----
+        # ---- pub/sub ----
         self.pub_intent = rospy.Publisher(self.intent_topic, String, queue_size=10)
         rospy.Subscriber(self.text_topic, String, self._on_text, queue_size=50)
         rospy.Subscriber(self.utt_end_topic, Bool, self._on_utterance_end, queue_size=50)
 
-        # confidence is optional
         try:
             rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)
         except Exception:
@@ -198,7 +194,6 @@ class GpsrParserNode:
             rospy.logwarn("utterance_end received but text is stale (age=%.3fs): %r", age, raw_text)
             return
 
-        # optional confidence gating
         if self.min_confidence >= 0.0 and self._latest_conf is not None:
             if self._latest_conf < self.min_confidence:
                 payload = self._make_base_v1(raw_text)
@@ -226,15 +221,8 @@ class GpsrParserNode:
         payload_v1 = self._coerce_to_v1(payload_any, raw_text)
         self._publish(payload_v1)
 
-    # ---------------- schema helpers ----------------
+    # ---------------- helpers ----------------
     def _ensure_dict(self, maybe, raw_text: str) -> dict:
-        """
-        Accept:
-          - dict
-          - JSON string
-          - object with to_dict()/to_json_str()/to_json()
-          - generic object (fallback to __dict__)
-        """
         if isinstance(maybe, dict):
             return maybe
 
@@ -292,7 +280,6 @@ class GpsrParserNode:
         }
 
     def _normalize_steps(self, steps_legacy) -> list:
-        """legacy: {action, fields} -> v1: {action, args}"""
         out = []
         if not isinstance(steps_legacy, list):
             return out
@@ -312,7 +299,6 @@ class GpsrParserNode:
         return out
 
     def _infer_intent_type(self, kind, steps_v1) -> str:
-        # composite if multiple steps
         if isinstance(steps_v1, list) and len(steps_v1) >= 2:
             return "composite"
         k = (kind or "").lower()
@@ -322,7 +308,7 @@ class GpsrParserNode:
             return "guide"
         if any(w in s for w in ["bring", "fetch", "deliver", "give", "takeobj", "bringme"]):
             return "bring"
-        if any(w in s for w in ["tell", "answer", "question", "count", "describe", "prop"]):
+        if any(w in s for w in ["tell", "answer", "question", "count", "describe", "prop", "talk"]):
             return "answer"
         if "find" in s:
             return "find"
@@ -331,11 +317,6 @@ class GpsrParserNode:
         return "other"
 
     def _best_place_from_text(self, raw_text: str):
-        """
-        raw_textから既知place候補を最長一致で推定する（ガイド先などの補完用）
-        - "waste basket" vs "waistbasket" のような表記ゆれを拾うため、
-          空白除去版でも照合する。
-        """
         if not raw_text:
             return None
         t = self._normalize_text(raw_text)
@@ -344,32 +325,24 @@ class GpsrParserNode:
         best = None
         best_len = -1
 
-        # 1) 通常の包含一致（語彙が閉じている前提）
         for p in self._all_places:
             if not p:
                 continue
-            if p in t:
-                if len(p) > best_len:
-                    best = p
-                    best_len = len(p)
+            if p in t and len(p) > best_len:
+                best = p
+                best_len = len(p)
 
-        # 2) 空白除去版でも照合（waistbasket 対策）
         for p in self._all_places:
             if not p:
                 continue
-            p_compact = p.replace(" ", "")
-            if p_compact and p_compact in t_compact:
-                if len(p) > best_len:
-                    best = p
-                    best_len = len(p)
+            pc = p.replace(" ", "")
+            if pc and pc in t_compact and len(p) > best_len:
+                best = p
+                best_len = len(p)
 
         return best
 
     def _extract_fixed_slots(self, steps_v1: list, legacy_slots: dict, raw_text: str = "") -> dict:
-        """
-        Fill fixed slots primarily from steps (truth), then fallback from legacy_slots.
-        raw_text は guide_person_to_dest など args空の補完に使用する。
-        """
         slots = {k: None for k in self.FIXED_SLOT_KEYS}
 
         def set_if_empty(key, val):
@@ -384,12 +357,12 @@ class GpsrParserNode:
             action = (st.get("action") or "").lower()
             args = st.get("args") or {}
 
-            # object-property question on place
+            # Q/A object property
             if action in ("tell_object_property_on_place", "tellobjproponplcmt", "tell_object_property"):
                 set_if_empty("comparison", args.get("comparison"))
                 set_if_empty("source_place", args.get("place"))
 
-            # NEW: greet_person_with_clothes_in_room -> source_room, attribute
+            # greet person with clothes in room -> source_room + attribute
             if action in ("greet_person_with_clothes_in_room", "greetclothdscinrm"):
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("attribute", args.get("clothes_description") or args.get("clothes") or args.get("attribute"))
@@ -404,6 +377,16 @@ class GpsrParserNode:
                 set_if_empty("object", args.get("object"))
                 set_if_empty("object_category", args.get("object_category") or args.get("object_or_category"))
 
+            # NEW: take_object_from_place -> source_place + (category/object)
+            if action in ("take_object_from_place", "takeobjfromplcmt", "take_object_from_placement"):
+                set_if_empty("source_place", args.get("place") or args.get("source_place"))
+                oc = args.get("object_or_category") or args.get("object_category")
+                if oc:
+                    # まずカテゴリに寄せる（drink/food/cleaning supply など）
+                    set_if_empty("object_category", oc)
+                else:
+                    set_if_empty("object", args.get("object"))
+
             # bring to operator
             if action in ("bring_object_to_operator", "bringmeobjfromplcmt", "bring_to_operator"):
                 set_if_empty("object", args.get("object"))
@@ -415,30 +398,37 @@ class GpsrParserNode:
                 set_if_empty("person", args.get("person") or args.get("name") or args.get("person_filter"))
                 set_if_empty("object", args.get("object"))
 
-            # guide named person with explicit from/to
+            # guide named person from/to
             if action in ("guide_named_person_from_place_to_place", "guidenamefrombeactobeac"):
                 set_if_empty("person", args.get("name") or args.get("person"))
                 set_if_empty("source_place", args.get("from_place"))
                 set_if_empty("destination_place", args.get("to_place"))
 
-            # NEW: guide_person_to_dest (args empty) -> infer destination_place from raw_text
+            # guide_person_to_dest (args empty) -> infer destination_place from raw_text
             if action in ("guide_person_to_dest", "guide_person_to_destination"):
                 set_if_empty("destination_place", args.get("to_place") or args.get("destination_place") or args.get("place"))
                 if slots.get("destination_place") is None:
-                    inferred = self._best_place_from_text(raw_text)
-                    set_if_empty("destination_place", inferred)
+                    set_if_empty("destination_place", self._best_place_from_text(raw_text))
+
+            # NEW: talk_to_person_in_room -> destination_room + person(person_filter)
+            if action in ("talk_to_person_in_room", "talkinfotogestprsinroom", "talk_to_person"):
+                # 会話対象がいる部屋なので destination_room に寄せる
+                set_if_empty("destination_room", args.get("room"))
+                set_if_empty("person", args.get("person") or args.get("name") or args.get("person_filter"))
+                # talk内容は attribute に入れておくと後段で使いやすい
+                set_if_empty("attribute", args.get("talk"))
 
             # place object
             if action in ("place_object_on_place", "place_object", "put_object_on_place"):
                 set_if_empty("destination_place", args.get("place"))
 
-        # ---- fallback mappings from legacy slots ----
+        # ---- fallback from legacy slots ----
         if isinstance(legacy_slots, dict):
             set_if_empty("object", legacy_slots.get("object"))
             set_if_empty("object_category", legacy_slots.get("object_category") or legacy_slots.get("object_or_category"))
             set_if_empty("source_room", legacy_slots.get("source_room") or legacy_slots.get("room"))
             set_if_empty("source_place", legacy_slots.get("source_place") or legacy_slots.get("place") or legacy_slots.get("from_place"))
-            set_if_empty("destination_room", legacy_slots.get("destination_room") or legacy_slots.get("destination"))
+            set_if_empty("destination_room", legacy_slots.get("destination_room") or legacy_slots.get("destination") or legacy_slots.get("room"))
             set_if_empty("destination_place", legacy_slots.get("destination_place") or legacy_slots.get("to_place"))
             set_if_empty("person", legacy_slots.get("person") or legacy_slots.get("name") or legacy_slots.get("person_filter"))
             set_if_empty("comparison", legacy_slots.get("comparison"))
@@ -454,26 +444,21 @@ class GpsrParserNode:
         v1["need_confirm"] = bool(payload.get("need_confirm", False))
         v1["source"] = payload.get("source", "parser")
         v1["confidence"] = payload.get("confidence", self._latest_conf)
-
-        # command_kind (legacy: kind)
         v1["command_kind"] = payload.get("command_kind", payload.get("kind"))
 
-        # steps normalize
         steps_v1 = self._normalize_steps(payload.get("steps", []) or [])
         v1["steps"] = steps_v1
 
-        # intent_type
         given_intent = payload.get("intent_type")
         if isinstance(given_intent, str) and given_intent.strip():
             v1["intent_type"] = given_intent
         else:
             v1["intent_type"] = self._infer_intent_type(v1["command_kind"], steps_v1)
 
-        # keep parser raw if exists (do this before slots補完に渡す raw_text を確定)
+        # keep raw/normalized first (used for destination inference)
         v1["raw_text"] = payload.get("raw_text", raw_text)
         v1["normalized_text"] = payload.get("normalized_text", self._normalize_text(v1["raw_text"]))
 
-        # slots fixed + extras legacy
         legacy_slots = payload.get("slots", {}) if isinstance(payload.get("slots"), dict) else {}
         v1["slots"] = self._extract_fixed_slots(steps_v1, legacy_slots, raw_text=v1["raw_text"])
         v1["extras"] = {"legacy_slots": legacy_slots}
