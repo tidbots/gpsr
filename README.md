@@ -2,7 +2,11 @@
 ロボットは、幅広く異なる能力を必要とする命令を理解し実行することが求められる。
 
 
+
+
 ## ToDo
+### 20 Dec. 2025
+パラメータ他を自動生成
 ```
 [vocab.yaml]  ←←← 年1回更新
      │
@@ -22,6 +26,9 @@ python3 tools/make_vocab_yaml.py \
   objects/objects.md \
   hsr_audio_pipeline/config/vocab.yaml
 ```
+
+
+### 20 Dec.2025
 **未テスト**
 テスト（ASR→intentまで）：
 ```
@@ -44,11 +51,14 @@ rostopic echo /gpsr/result
 
 
 
-**パラメータ他をハードコーティングしている**
+### 20 Dec.2025
+~~**パラメータ他をハードコーティングしている**~~
 
-**initial_prompt に入れておくと良い単語の微調整**
+~~**initial_prompt に入れておくと良い単語の微調整**~~
+->hot word
 
-**誤認識ログの収集と登録**
+~~**誤認識ログの収集と登録**~~
+->ツールを作成した
 
 
 ## インストールとDockerコンテナの実行
