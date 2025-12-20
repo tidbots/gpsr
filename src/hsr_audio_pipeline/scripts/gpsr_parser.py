@@ -1048,3 +1048,240 @@ class GpsrParser:
         if idx < 0:
             return ""
         return text[idx + len(phrase):].strip()
+
+
+# ================= gpsr_intent_v1 (fixed schema) =================
+
+
+@dataclass
+class GpsrIntentV1:
+    """
+    固定スキーマの intent 表現（実行は steps を唯一の真実として扱う想定）
+    """
+    schema: str = "gpsr_intent_v1"
+    ok: bool = True
+    need_confirm: bool = False
+    intent_type: str = "unknown"     # bring / find / go / count / tell / follow / guide / greet / meet / composite / unknown
+    slots: Dict[str, Any] = None
+    raw_text: str = ""
+    normalized_text: str = ""
+    confidence: Any = None           # {"asr":..., "parser":...} など。現状は None
+    source: str = "parser"
+    command_kind: str = ""           # 旧 "kind" をそのまま入れる
+    steps: List[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "ok": self.ok,
+            "need_confirm": self.need_confirm,
+            "intent_type": self.intent_type,
+            "slots": self.slots or {},
+            "raw_text": self.raw_text,
+            "normalized_text": self.normalized_text,
+            "confidence": self.confidence,
+            "source": self.source,
+            "command_kind": self.command_kind,
+            "steps": self.steps or [],
+        }
+
+    def to_json_str(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False)
+
+
+def _intent_type_from_kind_and_steps(kind: str, steps: List[GpsrStep]) -> str:
+    """
+    kind/steps から上位 intent_type を決める（ラベル）。
+    実行側は command_kind と steps を主に見ることを推奨。
+    """
+    if not steps:
+        return "unknown"
+    if len(steps) >= 2:
+        return "composite"
+
+    k = (kind or "").lower()
+
+    if "goto" in k:
+        return "go"
+    if "bring" in k or "deliver" in k:
+        return "bring"
+    if "takeobj" in k or "take" in k:
+        return "take"
+    if "findobj" in k or "findprs" in k or "find" in k:
+        return "find"
+    if "count" in k:
+        return "count"
+    if "tell" in k or "talk" in k or "answer" in k:
+        return "tell"
+    if "follow" in k:
+        return "follow"
+    if "guide" in k:
+        return "guide"
+    if "greet" in k:
+        return "greet"
+    if "meet" in k:
+        return "meet"
+    return "unknown"
+
+
+def _empty_fixed_slots() -> Dict[str, Any]:
+    """
+    gpsr_intent_v1 固定スロット（未使用は None）
+    """
+    return {
+        "object": None,
+        "object_category": None,
+        "quantity": None,
+
+        "source_room": None,
+        "source_place": None,
+        "destination_room": None,
+        "destination_place": None,
+
+        "person": None,
+        "person_at_source": None,
+        "person_at_destination": None,
+
+        "attribute": None,
+        "question_type": None,
+        "gesture": None,
+    }
+
+
+def _merge_slot(slots: Dict[str, Any], key: str, value: Any):
+    """None/空文字の上書きを避けつつ埋める。"""
+    if value is None:
+        return
+    if isinstance(value, str) and value.strip() == "":
+        return
+    # すでに埋まっているなら維持（後勝ちにしたいならここを変える）
+    if slots.get(key) is None:
+        slots[key] = value
+
+
+def _slots_from_steps(steps: List[GpsrStep]) -> Dict[str, Any]:
+    """
+    既存の steps(fields) から固定 slots を可能な範囲で埋める。
+    （実行は steps を見るので、slots は要約・デバッグ用途）
+    """
+    slots = _empty_fixed_slots()
+
+    for st in steps:
+        a = st.action
+        f = st.fields or {}
+
+        # --- objects / categories ---
+        if "object" in f:
+            _merge_slot(slots, "object", f.get("object"))
+        if "object_or_category" in f:
+            # ここは曖昧だが、find/take 系で多いので category として入れる（必要なら実運用で調整）
+            _merge_slot(slots, "object_category", f.get("object_or_category"))
+        if "object_category" in f:
+            _merge_slot(slots, "object_category", f.get("object_category"))
+        if "object_category_plural" in f:
+            _merge_slot(slots, "object_category", f.get("object_category_plural"))
+
+        # --- source / destination inference by action ---
+        if a in ("find_object_in_room", "find_person_in_room", "count_persons_in_room", "count_people_with_clothes_in_room"):
+            _merge_slot(slots, "source_room", f.get("room"))
+        if a in ("take_object_from_place", "count_objects_on_place", "tell_object_property_on_place", "tell_category_property_on_place"):
+            _merge_slot(slots, "source_place", f.get("place"))
+        if a in ("bring_object_to_operator",):
+            _merge_slot(slots, "source_place", f.get("source_place"))
+        if a in ("place_object_on_place", "place_object_on_place", "place_object_on_place", "place_object_on_place"):
+            _merge_slot(slots, "destination_place", f.get("place"))
+        if a in ("place_object_on_place", "place_object_on_place"):
+            pass
+        if a in ("deliver_object_to_named_person",):
+            _merge_slot(slots, "person", f.get("name"))
+            _merge_slot(slots, "destination_room", f.get("room"))
+        if a in ("deliver_object_to_person_in_room",):
+            _merge_slot(slots, "destination_room", f.get("room"))
+            _merge_slot(slots, "attribute", f.get("person_filter"))
+
+        if a in ("follow_named_person_from_loc_to_room",):
+            _merge_slot(slots, "person", f.get("name"))
+            _merge_slot(slots, "source_place", f.get("from_location"))
+            _merge_slot(slots, "destination_room", f.get("to_room"))
+
+        if a in ("guide_named_person_from_place_to_place",):
+            _merge_slot(slots, "person", f.get("name"))
+            _merge_slot(slots, "source_place", f.get("from_place"))
+            # from_place/to_place は room/place 両方ありうるので destination_place に寄せる
+            _merge_slot(slots, "destination_place", f.get("to_place"))
+
+        if a in ("guide_person_from_place_to_place",):
+            _merge_slot(slots, "attribute", f.get("person_filter"))
+            _merge_slot(slots, "source_place", f.get("from_place"))
+            _merge_slot(slots, "destination_place", f.get("to_place"))
+
+        if a in ("greet_named_person_in_room",):
+            _merge_slot(slots, "person", f.get("name"))
+            _merge_slot(slots, "source_room", f.get("room"))
+
+        if a in ("greet_person_with_clothes_in_room",):
+            _merge_slot(slots, "attribute", f.get("clothes_description"))
+            _merge_slot(slots, "source_room", f.get("room"))
+
+        if a in ("meet_person_at_place", "meet_named_person_at_location"):
+            _merge_slot(slots, "person", f.get("name"))
+            # meetは place/location なので source_place に寄せる
+            _merge_slot(slots, "source_place", f.get("place") or f.get("location"))
+
+        # --- question / tell ---
+        if a in ("talk_to_person_in_room",):
+            _merge_slot(slots, "attribute", f.get("person_filter"))
+            _merge_slot(slots, "source_room", f.get("room"))
+        if a in ("answer_to_person_in_room",):
+            _merge_slot(slots, "attribute", f.get("person_filter"))
+            _merge_slot(slots, "source_room", f.get("room"))
+            _merge_slot(slots, "question_type", f.get("question"))
+
+    return slots
+
+
+def _steps_to_v1_steps(steps: List[GpsrStep]) -> List[Dict[str, Any]]:
+    """
+    v1では steps の各要素を {action, args} 形式で出す。
+    既存互換のため fields も残したい場合は、ここで併記できるが、
+    原則 v1 は args のみ推奨。
+    """
+    out: List[Dict[str, Any]] = []
+    for st in steps:
+        out.append(
+            {
+                "action": st.action,
+                "args": st.fields or {},
+            }
+        )
+    return out
+
+
+# ---- GpsrCommand に v1 出力を追加（後方互換で to_json はそのまま） ----
+def gpsrcommand_to_intent_v1(self: GpsrCommand) -> GpsrIntentV1:
+    norm = normalize_text(self.raw_text) if self.raw_text else ""
+    intent_type = _intent_type_from_kind_and_steps(self.kind, self.steps)
+    slots = _slots_from_steps(self.steps)
+    v1_steps = _steps_to_v1_steps(self.steps)
+
+    return GpsrIntentV1(
+        ok=True,
+        need_confirm=False,
+        intent_type=intent_type,
+        slots=slots,
+        raw_text=self.raw_text,
+        normalized_text=norm,
+        confidence=None,
+        source="parser",
+        command_kind=self.kind,
+        steps=v1_steps,
+    )
+
+
+def gpsrcommand_to_intent_v1_json(self: GpsrCommand) -> str:
+    return gpsrcommand_to_intent_v1(self).to_json_str()
+
+
+# 動的にメソッド注入（既存コードへの影響を最小化）
+GpsrCommand.to_intent_v1 = gpsrcommand_to_intent_v1          # type: ignore
+GpsrCommand.to_intent_v1_json = gpsrcommand_to_intent_v1_json  # type: ignore
