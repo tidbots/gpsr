@@ -1,4 +1,7 @@
 <launch>
+  <!-- 語彙YAML（年ごとに差し替えるだけ） -->
+  <arg name="vocab_yaml" default="$(find hsr_audio_pipeline)/config/vocab.yaml"/>
+
   <!-- =======================
        audio_capture
        ======================= -->
@@ -24,28 +27,30 @@
     <param name="audio_topic" value="/audio/audio" />
     <param name="vad_topic"   value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
-    <!-- 必要ならチューニング -->
     <param name="speech_threshold"  value="0.6" />
     <param name="silence_threshold" value="0.3" />
     <param name="hangover_ms"       value="400" />
   </node>
 
   <!-- =======================
-       Faster-Whisper ASR (Step 1: VAD-driven, GPSR outputs)
+       Faster-Whisper ASR
        ======================= -->
   <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py"
         name="faster_whisper_asr_node" output="screen">
     <param name="audio_topic" value="/audio/audio" />
     <param name="vad_topic"   value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
+    <param name="sample_width" value="2" />
+    <param name="channels" value="1" />
 
-    <!-- GPSR ASR outputs -->
-    <param name="raw_text_topic"       value="/gpsr/asr/raw_text" />
-    <param name="text_topic"           value="/gpsr/asr/text" />
-    <param name="confidence_topic"     value="/gpsr/asr/confidence" />
-    <param name="utterance_end_topic"  value="/gpsr/asr/utterance_end" />
-　  <param name="vocab_yaml" value="$(find hsr_audio_pipeline)/config/vocab.yaml"/>
-  　<param name="use_hotwords" value="true"/>
+    <!-- GPSR ASR outputs（※差し替え版のparam名に合わせる） -->
+    <param name="text_topic"          value="/gpsr/asr/text" />
+    <param name="confidence_topic"    value="/gpsr/asr/confidence" />
+    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
+
+    <!-- NEW: vocab -->
+    <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
+    <param name="use_hotwords" value="true"/>
 
     <!-- Model -->
     <param name="model_size" value="small" />
@@ -53,39 +58,33 @@
     <param name="compute_type" value="float32" /> <!-- GPUなら float16 推奨 -->
     <param name="language" value="en" />
 
-    <!-- Segmentation -->
-    <param name="pre_roll_sec" value="0.25" />
-    <param name="post_roll_sec" value="0.35" />
-    <param name="min_segment_sec" value="0.6" />
+    <!-- Segmentation（※差し替え版のparam名に合わせる） -->
+    <param name="pre_roll" value="0.25" />
+    <param name="post_roll" value="0.35" />
     <param name="max_segment_sec" value="18.0" />
-
-    <param name="enable_corrections" value="true" />
   </node>
 
   <!-- =======================
-       GPSR Parser (Step 2 + 2.5: utterance_end-driven, unified schema)
+       GPSR Parser
        ======================= -->
- <!-- 語彙YAML（年ごとに差し替えるだけ） -->
-  <arg name="vocab_yaml" default="$(find hsr_audio_pipeline)/config/vocab.yaml"/>
   <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py"
         name="gpsr_parser_node" output="screen">
     <param name="text_topic"          value="/gpsr/asr/text" />
     <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
     <param name="confidence_topic"    value="/gpsr/asr/confidence" />
 
+    <!-- NEW: vocab -->
+    <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
+
     <!-- Unified intent output -->
     <param name="intent_topic" value="/gpsr/intent" />
 
-    <!-- jitter吸収 -->
     <param name="max_text_age_sec" value="1.0" />
-
-    <!-- confidence gate: 無効化は -1 -->
     <param name="min_confidence" value="-1.0" />
   </node>
 
   <!-- =======================
-       (Optional) Backup intent extractor
-       出力は /gpsr/intent_alt にして衝突回避
+       Optional backup intent extractor
        ======================= -->
   <arg name="start_intent_backup" default="false" />
   <group if="$(arg start_intent_backup)">
