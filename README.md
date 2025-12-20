@@ -3,6 +3,14 @@
 
 
 ## ToDo
+```
+python3 tools/make_vocab_yaml.py \
+  names/names.md \
+  maps/room_names.md \
+  maps/location_names.md \
+  objects/objects.md \
+  hsr_audio_pipeline/config/vocab.yaml
+```
 **未テスト**
 テスト（ASR→intentまで）：
 ```
