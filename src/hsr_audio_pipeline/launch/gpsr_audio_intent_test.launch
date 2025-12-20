@@ -63,6 +63,8 @@
   <!-- =======================
        GPSR Parser (Step 2 + 2.5: utterance_end-driven, unified schema)
        ======================= -->
+ <!-- 語彙YAML（年ごとに差し替えるだけ） -->
+  <arg name="vocab_yaml" default="$(find hsr_audio_pipeline)/config/vocab.yaml"/>
   <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py"
         name="gpsr_parser_node" output="screen">
     <param name="text_topic"          value="/gpsr/asr/text" />
