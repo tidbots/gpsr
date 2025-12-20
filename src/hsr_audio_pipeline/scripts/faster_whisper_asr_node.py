@@ -17,17 +17,17 @@ Key features:
   - External VAD drives segmentation
   - post_roll audio appended after speech_end
   - Uses faster-whisper WhisperModel
-  - NEW: loads GPSR vocab YAML via ~vocab_yaml
-      * auto-build hotwords string (NOT list!)  -> avoids .strip() crash
-      * auto-build light correction dict
+  - loads GPSR vocab YAML via ~vocab_yaml
+  - NEW (cache fix):
+      * ~model_cache_dir to persist HF cache
+      * sets HF_HOME / HUGGINGFACE_HUB_CACHE / XDG_CACHE_HOME
+      * uses WhisperModel(..., download_root=...)
+      * optional ~model_path to load local model directly if exists
 """
 
 import os
 import re
-import sys
-import json
 import time
-import queue
 import yaml
 import threading
 from collections import deque
@@ -65,6 +65,16 @@ def _unique_keep_order(xs: List[str]) -> List[str]:
     return out
 
 
+def _ensure_dir(path: str) -> str:
+    if not path:
+        return path
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        rospy.logwarn("Could not create dir: %s (%s)", path, e)
+    return path
+
+
 def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
     """
     Returns:
@@ -86,7 +96,6 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
     for r in y.get("rooms", []) or []:
         if isinstance(r, str) and r.strip():
             words.append(r.strip())
-            # allow compact form correction (e.g. livingroom -> living room)
             rr = r.strip()
             if " " in rr:
                 corrections[_lower(rr.replace(" ", ""))] = _lower(rr)
@@ -99,10 +108,8 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
         if not name:
             continue
         words.append(name)
-        # compact/spaced corrections (waistbasket vs waste basket etc.)
         if " " in name:
             corrections[_lower(name.replace(" ", ""))] = _lower(name)
-        # hyphen variants
         if "-" in name:
             corrections[_lower(name.replace("-", " "))] = _lower(name.replace("-", " "))
             corrections[_lower(name.replace("-", ""))] = _lower(name.replace("-", " "))
@@ -117,33 +124,24 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
             words.append(singular)
         if plural:
             words.append(plural)
-
-        # singular/plural correction (light)
         if singular and plural:
-            corrections[_lower(plural)] = _lower(plural)  # keep
+            corrections[_lower(plural)] = _lower(plural)
             corrections[_lower(singular)] = _lower(singular)
 
         for o in c.get("objects", []) or []:
             if not isinstance(o, str):
                 continue
-            # objects in YAML may be snake_case -> use spaced for speech
             obj = o.replace("_", " ").strip()
             if not obj:
                 continue
             words.append(obj)
-
-            # allow underscore/space/compact corrections
             corrections[_lower(o)] = _lower(obj)
             if " " in obj:
                 corrections[_lower(obj.replace(" ", ""))] = _lower(obj)
 
-    # very light canonicalization for common GPSR typos (optional, harmless)
-    # (you can add more; parser will still be final judge)
-    # NOTE: keep them lowercase keys
-    corrections.setdefault("foot", "food")  # classic
-    corrections.setdefault("past room", "bathroom")  # classic
+    corrections.setdefault("foot", "food")
+    corrections.setdefault("past room", "bathroom")
 
-    # cleanup
     words = [w.strip() for w in words if isinstance(w, str) and w.strip()]
     words = _unique_keep_order(words)
 
@@ -151,12 +149,6 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
 
 
 def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
-    """
-    Build a hotwords STRING for faster-whisper.
-    - Prefer longer phrases first (helps tokenization / matching)
-    - Clamp number of terms to avoid excessively long prompts
-    """
-    # normalize & de-dupe by lowercase
     tmp = {}
     for w in words:
         ww = _normalize_ws(w)
@@ -164,37 +156,19 @@ def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
             continue
         tmp.setdefault(ww.lower(), ww)
     uniq = list(tmp.values())
-
-    # sort: longer phrases first, then alphabetically (stable)
     uniq.sort(key=lambda s: (-len(s), s.lower()))
-
     if len(uniq) > max_terms:
         uniq = uniq[:max_terms]
-
-    # faster-whisper expects a single string (NOT list!)
     return " ".join(uniq)
 
 
 class CorrectionEngine:
-    """
-    Light post-ASR correction:
-      - apply phrase substitutions using word boundaries where reasonable
-      - only lowercase matching; output is lowercase (OK because parser normalizes anyway)
-    """
-
     def __init__(self, mapping: Dict[str, str]):
-        # mapping: lowercase -> lowercase
-        self.mapping = { _lower(k): _lower(v) for k, v in (mapping or {}).items() if _lower(k) and _lower(v) }
-        # sort keys by length desc (phrase first)
+        self.mapping = {_lower(k): _lower(v) for k, v in (mapping or {}).items() if _lower(k) and _lower(v)}
         self.keys = sorted(self.mapping.keys(), key=lambda s: -len(s))
-        # compile regex patterns
         self.patterns: List[Tuple[re.Pattern, str]] = []
         for k in self.keys:
-            # if key contains spaces, do a loose boundary match around the phrase
-            if " " in k:
-                pat = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
-            else:
-                pat = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
+            pat = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
             self.patterns.append((pat, self.mapping[k]))
 
     def apply(self, text: str) -> str:
@@ -203,8 +177,7 @@ class CorrectionEngine:
             return t
         for pat, rep in self.patterns:
             t = pat.sub(rep, t)
-        t = _normalize_ws(t)
-        return t
+        return _normalize_ws(t)
 
 
 # ----------------------------
@@ -227,8 +200,8 @@ class FasterWhisperASRNode:
         self.channels = int(rospy.get_param("~channels", 1))
 
         # VAD segmentation
-        self.pre_roll = float(rospy.get_param("~pre_roll", 0.25))   # seconds
-        self.post_roll = float(rospy.get_param("~post_roll", 0.35)) # seconds
+        self.pre_roll = float(rospy.get_param("~pre_roll", 0.25))
+        self.post_roll = float(rospy.get_param("~post_roll", 0.35))
         self.max_segment_sec = float(rospy.get_param("~max_segment_sec", 12.0))
 
         # faster-whisper
@@ -237,6 +210,26 @@ class FasterWhisperASRNode:
         self.compute_type = rospy.get_param("~compute_type", "float32")
         self.language = rospy.get_param("~language", "en")
         self.beam_size = int(rospy.get_param("~beam_size", 5))
+
+        # NEW: model cache / local path
+        # - model_path: if exists, load directly (no download)
+        # - model_cache_dir: persistent cache root for HF hub (use Docker volume!)
+        self.model_path = rospy.get_param("~model_path", "").strip()
+        self.model_cache_dir = rospy.get_param("~model_cache_dir", "/models/hf").strip()
+        self.model_cache_dir = _ensure_dir(self.model_cache_dir)
+
+        # Force HF caches to persistent dir (prevents re-download each boot)
+        # NOTE: keep consistent across processes/users inside container.
+        hf_home = self.model_cache_dir
+        hub_cache = os.path.join(self.model_cache_dir, "hub")
+        xdg_cache = os.path.join(self.model_cache_dir, "xdg")
+        _ensure_dir(hub_cache)
+        _ensure_dir(xdg_cache)
+
+        os.environ.setdefault("HF_HOME", hf_home)
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", hub_cache)
+        os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(self.model_cache_dir, "transformers"))
+        os.environ.setdefault("XDG_CACHE_HOME", xdg_cache)
 
         # prompts / hotwords
         self.use_hotwords = bool(rospy.get_param("~use_hotwords", True))
@@ -248,7 +241,6 @@ class FasterWhisperASRNode:
             "You are a home service robot. Transcribe spoken GPSR commands in English accurately."
         )
 
-        # publish confidence? (simple average prob)
         self.publish_confidence = bool(rospy.get_param("~publish_confidence", True))
 
         # ---- vocab -> hotwords + corrections ----
@@ -268,8 +260,24 @@ class FasterWhisperASRNode:
                 rospy.logwarn("vocab_yaml not found: %s (hotwords disabled)", self.vocab_yaml)
 
         # ---- model ----
-        rospy.loginfo("Loading WhisperModel: size=%s device=%s compute_type=%s", self.model_size, self.device, self.compute_type)
-        self.model = WhisperModel(self.model_size, device=self.device, compute_type=self.compute_type)
+        rospy.loginfo("HF cache: HF_HOME=%s HUGGINGFACE_HUB_CACHE=%s XDG_CACHE_HOME=%s",
+                      os.environ.get("HF_HOME"), os.environ.get("HUGGINGFACE_HUB_CACHE"), os.environ.get("XDG_CACHE_HOME"))
+
+        model_id = self.model_path if (self.model_path and os.path.exists(self.model_path)) else self.model_size
+        if self.model_path and not os.path.exists(self.model_path):
+            rospy.logwarn("model_path set but not found: %s (fallback to model_size=%s)", self.model_path, self.model_size)
+
+        rospy.loginfo("Loading WhisperModel: model=%s device=%s compute_type=%s download_root=%s",
+                      model_id, self.device, self.compute_type, self.model_cache_dir)
+
+        # download_root forces faster-whisper to place downloaded snapshots under this directory.
+        # If already downloaded, it will reuse existing files (no re-download).
+        self.model = WhisperModel(
+            model_id,
+            device=self.device,
+            compute_type=self.compute_type,
+            download_root=self.model_cache_dir,
+        )
 
         # ---- ROS pub/sub ----
         self.pub_text = rospy.Publisher(self.text_topic, String, queue_size=10)
@@ -294,7 +302,6 @@ class FasterWhisperASRNode:
         self._pending_finalize = False
         self._finalize_at = 0.0  # wall time
 
-        # timer
         self._timer = rospy.Timer(rospy.Duration(0.05), self._timer_cb)
 
         rospy.loginfo("FasterWhisperASRNode started. audio=%s vad=%s -> text=%s utt_end=%s",
@@ -306,14 +313,12 @@ class FasterWhisperASRNode:
         now = time.time()
         with self._lock:
             self._ring.append((now, b))
-            # drop old
             cutoff = now - self._ring_max_sec
             while self._ring and self._ring[0][0] < cutoff:
                 self._ring.popleft()
 
             if self._in_speech:
                 self._seg_bytes.extend(b)
-                # hard cap
                 if self._seg_start_time is not None and (now - self._seg_start_time) > self.max_segment_sec:
                     rospy.logwarn("ASR: max_segment_sec reached -> force finalize")
                     self._schedule_finalize(post_roll=self.post_roll)
@@ -324,13 +329,11 @@ class FasterWhisperASRNode:
 
         with self._lock:
             if is_speech and not self._in_speech:
-                # speech start: add pre-roll from ring
                 self._in_speech = True
                 self._pending_finalize = False
                 self._seg_bytes = bytearray()
                 self._seg_start_time = now
 
-                # collect pre-roll bytes
                 preroll_cut = now - self.pre_roll
                 for t, b in self._ring:
                     if t >= preroll_cut:
@@ -339,7 +342,6 @@ class FasterWhisperASRNode:
                 rospy.loginfo("ASR: VAD ON -> start segment (pre_roll=%.2fs)", self.pre_roll)
 
             elif (not is_speech) and self._in_speech:
-                # speech end: schedule finalize after post_roll
                 self._in_speech = False
                 rospy.loginfo("ASR: VAD OFF -> finalize pending (post_roll=%.2fs)", self.post_roll)
                 self._schedule_finalize(post_roll=self.post_roll)
@@ -356,7 +358,6 @@ class FasterWhisperASRNode:
             if time.time() < self._finalize_at:
                 return
 
-            # append post-roll audio from ring (from end time to now)
             end_now = time.time()
             post_cut = end_now - self.post_roll
             post_bytes = bytearray()
@@ -369,13 +370,11 @@ class FasterWhisperASRNode:
             self._seg_bytes = bytearray()
             self._seg_start_time = None
 
-        # transcribe outside lock
         if not chunks:
             return
         text, conf = self._transcribe_bytes_s16le(chunks)
 
         if text:
-            # post correction (light)
             text2 = self.corr.apply(text)
             if text2:
                 text = text2
@@ -384,17 +383,14 @@ class FasterWhisperASRNode:
             if self.pub_conf is not None and conf is not None:
                 self.pub_conf.publish(Float32(data=float(conf)))
 
-            # utterance_end pulse
             self.pub_utt_end.publish(Bool(data=True))
 
     # ---------------- ASR core ----------------
     def _transcribe_bytes_s16le(self, pcm_bytes: bytes) -> Tuple[str, Optional[float]]:
-        # bytes -> float32 mono
         if self.sample_width != 2 or self.channels != 1:
             rospy.logwarn("ASR: only supports S16LE mono in this node (sample_width=2, channels=1)")
         a = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # guard very short
         if a.size < int(self.sample_rate * 0.15):
             return "", None
 
@@ -403,26 +399,22 @@ class FasterWhisperASRNode:
                 language=self.language,
                 beam_size=self.beam_size,
                 initial_prompt=self.initial_prompt if self.initial_prompt else None,
-                vad_filter=False,  # external VAD already used
+                vad_filter=False,
             )
 
-            # IMPORTANT: hotwords must be a STRING, not list
             if self.use_hotwords and isinstance(self.hotwords_str, str) and self.hotwords_str.strip():
                 kwargs["hotwords"] = self.hotwords_str
 
-            segments, info = self.model.transcribe(a, **kwargs)
+            segments, _info = self.model.transcribe(a, **kwargs)
 
             seg_list = list(segments)
             text = "".join([(s.text or "") for s in seg_list]).strip()
 
-            # confidence: average no_speech_prob -> invert; or avg logprob
             conf = None
             try:
                 if seg_list:
-                    # higher avg_logprob is better (typically negative)
                     avg_lp = float(np.mean([s.avg_logprob for s in seg_list if s.avg_logprob is not None]))
-                    # map roughly into 0..1 (soft)
-                    conf = float(1.0 / (1.0 + np.exp(-avg_lp)))  # sigmoid
+                    conf = float(1.0 / (1.0 + np.exp(-avg_lp)))
             except Exception:
                 conf = None
 
