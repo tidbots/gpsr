@@ -4,6 +4,17 @@
 
 ## ToDo
 ```
+[vocab.yaml]  ←←← 年1回更新
+     │
+     ├─ gpsr_parser_node
+     │    └─ 厳密な構文・意味解釈（正解判定）
+     │
+     └─ faster_whisper_asr_node
+          ├─ hotwords 生成
+          ├─ correction 辞書生成
+          └─ 正規化テキスト出力
+```
+```
 python3 tools/make_vocab_yaml.py \
   names/names.md \
   maps/room_names.md \
