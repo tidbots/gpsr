@@ -23,7 +23,6 @@ catkin_install_python(
     scripts/audio_rms_monitor.py
     scripts/silero_vad_node.py
     scripts/faster_whisper_asr_node.py
-    scripts/faster_whisper_asr_simple_node.py
     scripts/gpsr_intent_node.py
     scripts/asr_plain_echo.py
     scripts/gpsr_smach_node.py
