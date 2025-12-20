@@ -58,6 +58,7 @@ rostopic echo /gpsr/result
 
 ### 20 Dec.2025
 ~~**パラメータ他をハードコーティングしている**~~
+->ファイルから読むようにした
 
 ~~**initial_prompt に入れておくと良い単語の微調整**~~
 ->hot word
