@@ -79,7 +79,7 @@
     <!-- Unified intent output -->
     <param name="intent_topic" value="/gpsr/intent" />
 
-    <param name="max_text_age_sec" value="1.0" />
+    <param name="max_text_age_sec" value="30.0" />
     <param name="min_confidence" value="-1.0" />
   </node>
 
