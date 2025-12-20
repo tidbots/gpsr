@@ -15,11 +15,15 @@ Pub:
 This node:
   - Triggers parse on utterance_end(True)
   - Calls gpsr_parser.GpsrParser (requires 7 vocab args)
-  - Publishes *fixed* schema gpsr_intent_v1:
+  - Publishes fixed schema gpsr_intent_v1:
       steps: [{action, args}] (legacy fields -> args)
-      slots: fixed keys (source_room/source_place/destination_room/destination_place/object/object_category/person...)
+      slots: fixed keys with null when absent
       extras.legacy_slots preserves original variable slots
   - Robust: parser may return dict / JSON str / object; always normalizes to dict.
+
+Additions (2025-12):
+  - Map greet_person_with_clothes_in_room -> slots.source_room, slots.attribute
+  - Map guide_person_to_dest (args empty) -> infer destination_place from raw_text
 """
 
 import os
@@ -86,9 +90,6 @@ class GpsrParserNode:
         self._latest_conf_stamp = rospy.Time(0)
 
         # ---- vocab (defaults; can be overridden by ROS params) ----
-        # You can override by setting params:
-        #   ~person_names, ~location_names, ~placement_location_names, ~room_names,
-        #   ~object_names, ~object_categories_plural, ~object_categories_singular
         default_person_names = [
             "Adel", "Angel", "Axel", "Charlie", "Jane",
             "Jules", "Morgan", "Paris", "Robin", "Simone",
@@ -98,7 +99,6 @@ class GpsrParserNode:
             "bedroom", "kitchen", "living room", "office", "bathroom"
         ]
 
-        # "Locations" (beacons) in rulebooks
         default_location_names = [
             "bed", "bedside table", "shelf", "trashbin", "dishwasher", "potted plant",
             "kitchen table", "chairs", "pantry", "refrigerator", "sink", "cabinet",
@@ -106,7 +106,6 @@ class GpsrParserNode:
             "storage rack", "lamp", "side tables", "sofa", "bookshelf", "entrance", "exit",
         ]
 
-        # Placement locations (subset of locations where objects can be placed/found)
         default_placement_location_names = [
             "bed", "bedside table", "shelf", "dishwasher",
             "kitchen table", "pantry", "refrigerator", "sink",
@@ -114,7 +113,6 @@ class GpsrParserNode:
             "side tables", "sofa", "bookshelf",
         ]
 
-        # Objects
         default_object_names = [
             "juice pack", "cola", "milk", "orange juice", "tropical juice",
             "red wine", "iced tea",
@@ -127,7 +125,6 @@ class GpsrParserNode:
             "cleanser", "sponge",
         ]
 
-        # Categories (singular/plural)
         default_cat_singular = [
             "drink", "toy", "fruit", "snack", "dish", "food", "cleaning supply"
         ]
@@ -143,6 +140,14 @@ class GpsrParserNode:
         object_names = rospy.get_param("~object_names", default_object_names)
         object_categories_plural = rospy.get_param("~object_categories_plural", default_cat_plural)
         object_categories_singular = rospy.get_param("~object_categories_singular", default_cat_singular)
+
+        # Keep vocab for slot補完（raw_textからplace推定などに使う）
+        self._location_names = location_names
+        self._placement_location_names = placement_location_names
+        # place候補（lower/strip済み、重複除去）
+        self._all_places = list(
+            set([s.lower().strip() for s in (location_names + placement_location_names) if isinstance(s, str)])
+        )
 
         # ---- build parser (REQUIRED ARGS) ----
         self.parser = GpsrParser(
@@ -325,9 +330,45 @@ class GpsrParserNode:
             return "place"
         return "other"
 
-    def _extract_fixed_slots(self, steps_v1: list, legacy_slots: dict) -> dict:
+    def _best_place_from_text(self, raw_text: str):
+        """
+        raw_textから既知place候補を最長一致で推定する（ガイド先などの補完用）
+        - "waste basket" vs "waistbasket" のような表記ゆれを拾うため、
+          空白除去版でも照合する。
+        """
+        if not raw_text:
+            return None
+        t = self._normalize_text(raw_text)
+        t_compact = t.replace(" ", "")
+
+        best = None
+        best_len = -1
+
+        # 1) 通常の包含一致（語彙が閉じている前提）
+        for p in self._all_places:
+            if not p:
+                continue
+            if p in t:
+                if len(p) > best_len:
+                    best = p
+                    best_len = len(p)
+
+        # 2) 空白除去版でも照合（waistbasket 対策）
+        for p in self._all_places:
+            if not p:
+                continue
+            p_compact = p.replace(" ", "")
+            if p_compact and p_compact in t_compact:
+                if len(p) > best_len:
+                    best = p
+                    best_len = len(p)
+
+        return best
+
+    def _extract_fixed_slots(self, steps_v1: list, legacy_slots: dict, raw_text: str = "") -> dict:
         """
         Fill fixed slots primarily from steps (truth), then fallback from legacy_slots.
+        raw_text は guide_person_to_dest など args空の補完に使用する。
         """
         slots = {k: None for k in self.FIXED_SLOT_KEYS}
 
@@ -348,6 +389,11 @@ class GpsrParserNode:
                 set_if_empty("comparison", args.get("comparison"))
                 set_if_empty("source_place", args.get("place"))
 
+            # NEW: greet_person_with_clothes_in_room -> source_room, attribute
+            if action in ("greet_person_with_clothes_in_room", "greetclothdscinrm"):
+                set_if_empty("source_room", args.get("room"))
+                set_if_empty("attribute", args.get("clothes_description") or args.get("clothes") or args.get("attribute"))
+
             # go to location/room
             if action in ("go_to_location", "goto_location", "go_to_room", "goto_room"):
                 set_if_empty("source_room", args.get("room") or args.get("location"))
@@ -357,11 +403,6 @@ class GpsrParserNode:
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("object", args.get("object"))
                 set_if_empty("object_category", args.get("object_category") or args.get("object_or_category"))
-
-            # take object (often empty args; downstream uses last_found)
-            if action in ("take_object", "takeobjfromplcmt", "take_object_from_place"):
-                # no stable slot fill here
-                pass
 
             # bring to operator
             if action in ("bring_object_to_operator", "bringmeobjfromplcmt", "bring_to_operator"):
@@ -374,11 +415,18 @@ class GpsrParserNode:
                 set_if_empty("person", args.get("person") or args.get("name") or args.get("person_filter"))
                 set_if_empty("object", args.get("object"))
 
-            # guide
+            # guide named person with explicit from/to
             if action in ("guide_named_person_from_place_to_place", "guidenamefrombeactobeac"):
                 set_if_empty("person", args.get("name") or args.get("person"))
                 set_if_empty("source_place", args.get("from_place"))
                 set_if_empty("destination_place", args.get("to_place"))
+
+            # NEW: guide_person_to_dest (args empty) -> infer destination_place from raw_text
+            if action in ("guide_person_to_dest", "guide_person_to_destination"):
+                set_if_empty("destination_place", args.get("to_place") or args.get("destination_place") or args.get("place"))
+                if slots.get("destination_place") is None:
+                    inferred = self._best_place_from_text(raw_text)
+                    set_if_empty("destination_place", inferred)
 
             # place object
             if action in ("place_object_on_place", "place_object", "put_object_on_place"):
@@ -421,14 +469,14 @@ class GpsrParserNode:
         else:
             v1["intent_type"] = self._infer_intent_type(v1["command_kind"], steps_v1)
 
-        # slots fixed + extras legacy
-        legacy_slots = payload.get("slots", {}) if isinstance(payload.get("slots"), dict) else {}
-        v1["slots"] = self._extract_fixed_slots(steps_v1, legacy_slots)
-        v1["extras"] = {"legacy_slots": legacy_slots}
-
-        # keep parser raw if exists
+        # keep parser raw if exists (do this before slots補完に渡す raw_text を確定)
         v1["raw_text"] = payload.get("raw_text", raw_text)
         v1["normalized_text"] = payload.get("normalized_text", self._normalize_text(v1["raw_text"]))
+
+        # slots fixed + extras legacy
+        legacy_slots = payload.get("slots", {}) if isinstance(payload.get("slots"), dict) else {}
+        v1["slots"] = self._extract_fixed_slots(steps_v1, legacy_slots, raw_text=v1["raw_text"])
+        v1["extras"] = {"legacy_slots": legacy_slots}
 
         v1["schema"] = "gpsr_intent_v1"
         return v1
