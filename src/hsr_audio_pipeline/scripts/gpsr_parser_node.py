@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+gpsr_parser_node.py (patched)
+
+Goal:
+- Publish a *fixed* gpsr_intent_v1 JSON on /gpsr/intent.
+- Keep your existing gpsr_parser.py logic intact (it may output legacy keys/steps.fields).
+- Convert legacy output -> v1:
+    - steps: {action, args}  (convert from fields if needed)
+    - slots: fixed keys (object/object_category/source_room/source_place/destination_room/destination_place/person...)
+    - keep extra legacy fields under "extras" so nothing is lost.
+
+Trigger:
+- Parse only when /gpsr/asr/utterance_end == True (pulse recommended).
+
+"""
+
 import os
 import sys
 sys.path.append(os.path.dirname(__file__))
@@ -13,22 +29,7 @@ from gpsr_parser import GpsrParser
 
 
 class GpsrParserNode:
-    """
-    GPSR parser node (ROS1 / Noetic)
-
-    - Subscribes to /gpsr/asr/text and /gpsr/asr/utterance_end
-    - Parses when utterance_end(True) arrives
-    - Publishes unified intent schema: gpsr_intent_v1 as std_msgs/String(JSON)
-
-    Key guarantees (v1):
-      - steps: [{action, args}] (args unified; accepts old 'fields' internally)
-      - slots: fixed keys (source_room/source_place/destination_room/destination_place/object/object_category/person...)
-      - command_kind preserved (from parser 'kind')
-    """
-
-    # ----------------------------
-    # Fixed schema keys
-    # ----------------------------
+    # ---- fixed slot schema (stable across all templates) ----
     FIXED_SLOT_KEYS = [
         "object",
         "object_category",
@@ -49,26 +50,25 @@ class GpsrParserNode:
     ]
 
     def __init__(self):
-        # ---- Params ----
+        # Topics
         self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
         self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
         self.conf_topic = rospy.get_param("~confidence_topic", "/gpsr/asr/confidence")
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
 
-        # If utterance_end arrives but /gpsr/asr/text timestamp is older than this, ignore.
-        self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 1.0))
+        # Freshness window: utterance_end must be close to last text
+        self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 2.0))
 
-        # Optional confidence gating: if >=0 and confidence is available, low confidence -> need_confirm
+        # Optional confidence gating
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
-        # ---- Latest ASR ----
+        # Latest ASR cache
         self._latest_text = ""
         self._latest_text_stamp = rospy.Time(0)
-
         self._latest_conf = None
         self._latest_conf_stamp = rospy.Time(0)
 
-        # ---- Vocabulary (keep consistent with your project) ----
+        # Vocabulary (keep same as your current node – adjust here if you maintain elsewhere)
         person_names = [
             "Adel", "Angel", "Axel", "Charlie", "Jane",
             "Jules", "Morgan", "Paris", "Robin", "Simone",
@@ -119,17 +119,14 @@ class GpsrParserNode:
             object_categories_singular=cat_sing,
         )
 
-        # ---- ROS pub/sub ----
         self.pub_intent = rospy.Publisher(self.intent_topic, String, queue_size=10)
 
         rospy.Subscriber(self.text_topic, String, self._on_text, queue_size=50)
         rospy.Subscriber(self.utt_end_topic, Bool, self._on_utt_end, queue_size=50)
-        rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)  # optional
+        rospy.Subscriber(self.conf_topic, Float32, self._on_conf, queue_size=50)
 
-        rospy.loginfo(
-            "gpsr_parser_node(v1): text=%s utterance_end=%s conf=%s -> intent=%s",
-            self.text_topic, self.utt_end_topic, self.conf_topic, self.intent_topic
-        )
+        rospy.loginfo("gpsr_parser_node(patched_v1): %s + %s -> %s",
+                      self.text_topic, self.utt_end_topic, self.intent_topic)
 
     def _on_text(self, msg: String):
         self._latest_text = msg.data or ""
@@ -139,134 +136,126 @@ class GpsrParserNode:
         self._latest_conf = float(msg.data)
         self._latest_conf_stamp = rospy.Time.now()
 
-    # ----------------------------
-    # Unified schema helpers
-    # ----------------------------
     @staticmethod
     def _normalize_text(s: str) -> str:
         s = (s or "").strip()
-        # minimal normalization (keep it conservative)
         s = " ".join(s.split())
         return s.lower()
-
-    @staticmethod
-    def _ensure_steps_args(steps):
-        """
-        Convert old step format {action, fields} into v1 format {action, args}.
-        Keep original keys (like fields) out of published steps to stabilize schema.
-        """
-        out = []
-        for s in (steps or []):
-            if not isinstance(s, dict):
-                continue
-            action = s.get("action", "")
-            if "args" in s and isinstance(s.get("args"), dict):
-                args = dict(s["args"])
-            else:
-                f = s.get("fields") or {}
-                args = dict(f) if isinstance(f, dict) else {}
-            out.append({"action": action, "args": args})
-        return out
-
-    def _coarse_intent_type(self, command_kind: str, steps_v1: list) -> str:
-        """
-        Coarse intent type for SMACH branching.
-        - If multiple steps -> composite (recommended)
-        - Else infer from kind/actions
-        """
-        if len(steps_v1) >= 2:
-            return "composite"
-
-        kind = (command_kind or "").lower()
-        actions = " ".join([(s.get("action", "") or "").lower() for s in steps_v1])
-        key = (kind + " " + actions).strip()
-
-        if any(k in key for k in ["guide", "escort", "lead"]):
-            return "guide"
-        if any(k in key for k in ["bring", "fetch", "deliver", "take", "give"]):
-            return "bring"
-        if any(k in key for k in ["count", "tell", "answer", "describe", "how many", "what", "who"]):
-            return "answer"
-        if any(k in key for k in ["find"]):
-            return "find"
-        if any(k in key for k in ["place", "put"]):
-            return "place"
-        return "other"
 
     def _empty_fixed_slots(self) -> dict:
         return {k: None for k in self.FIXED_SLOT_KEYS}
 
-    def _extract_fixed_slots_from_steps(self, steps_v1: list) -> dict:
+    @staticmethod
+    def _ensure_steps_args(steps):
+        """Legacy {action, fields} -> v1 {action, args}"""
+        out = []
+        for st in steps or []:
+            if not isinstance(st, dict):
+                continue
+            action = st.get("action", "")
+            args = st.get("args")
+            if not isinstance(args, dict):
+                fields = st.get("fields")
+                args = fields if isinstance(fields, dict) else {}
+            out.append({"action": action, "args": dict(args)})
+        return out
+
+    def _extract_slots_from_steps(self, steps_v1: list) -> dict:
         """
         Build fixed slots from v1 steps.
-        Principle: steps are the source of truth; slots are a stable summary.
+        Conservative mapping: only fill when confident.
         """
         slots = self._empty_fixed_slots()
 
-        # helper: first-non-null set
-        def set_if_empty(key, val):
+        def put(key, val):
             if val is None:
                 return
-            if isinstance(val, str) and val.strip() == "":
+            if isinstance(val, str) and not val.strip():
                 return
             if slots.get(key) is None:
                 slots[key] = val
 
         for st in steps_v1:
             action = (st.get("action") or "").lower()
-            args = st.get("args") or {}
+            a = st.get("args") or {}
 
-            # Common keys (object/category/person/place/room)
-            # We keep these conservative and action-aware.
+            # find / go
+            if action in ["find_object_in_room", "findobjinroom"]:
+                put("source_room", a.get("room"))
+                put("object", a.get("object"))
+                put("object_category", a.get("object_category") or a.get("object_or_category"))
 
-            # find object in room
-            if action in ["find_object_in_room", "findobjinroom", "find_object_room"]:
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category") or args.get("object_or_category"))
+            if action in ["go_to_location", "goto_room", "go_to_room"]:
+                # may contain room or place; try room first
+                put("source_room", a.get("room"))
 
-            # bring me object from placement
+            if action in ["go_to_place", "goto_place", "goto_location"]:
+                # ambiguous; treat as destination_place if not set
+                put("destination_place", a.get("place") or a.get("location"))
+
+            # bring
             if action in ["bring_object_to_operator", "bring_to_operator", "bring_object"]:
-                set_if_empty("object", args.get("object"))
-                set_if_empty("source_place", args.get("source_place") or args.get("place"))
+                put("object", a.get("object"))
+                put("source_place", a.get("source_place") or a.get("place"))
 
-            # place object on place
+            # take
+            if action in ["take_object", "pick_object", "pickup_object"]:
+                # could optionally set object if provided
+                put("object", a.get("object") or a.get("target_object"))
+
+            # place
             if action in ["place_object_on_place", "put_object_on_place", "place_object"]:
-                set_if_empty("destination_place", args.get("place"))
+                put("destination_place", a.get("place"))
 
-            # go to room/place (sometimes parser emits these)
-            if action in ["goto_room", "go_to_room"]:
-                set_if_empty("source_room", args.get("room"))
-            if action in ["goto_place", "go_to_place", "goto_location"]:
-                # if we don't know whether source/destination, prefer destination_place when action comes late
-                # but keep conservative: only set destination_place if empty
-                set_if_empty("destination_place", args.get("place") or args.get("location"))
+            # deliver / give
+            if action in ["deliver_object_to_person_in_room", "deliver_object_to_person", "give_object_to_person"]:
+                put("destination_room", a.get("room"))
+                put("person", a.get("person") or a.get("name"))
+                put("person_at_destination", a.get("person") or a.get("name"))
+                # Some templates use person_filter
+                put("attribute", a.get("person_filter"))
 
-            # give/deliver to person
-            if action in ["give_object_to_person", "deliver_object_to_person", "give_object"]:
-                set_if_empty("person", args.get("person") or args.get("name"))
-                set_if_empty("object", args.get("object"))
+            # guide
+            if action in ["guide_named_person_from_place_to_place", "guide_person_from_place_to_place"]:
+                put("person", a.get("name"))
+                put("source_place", a.get("from_place"))
+                put("destination_place", a.get("to_place"))
 
-            # answer/question type
-            if action in ["answer_question", "answer", "ask_question", "ask"]:
-                set_if_empty("question_type", args.get("question_type"))
-                set_if_empty("attribute", args.get("attribute"))
-
-        # Some legacy compatibility (optional)
-        # If object_category empty but object_or_category exists somewhere else, we already handled it above.
+            # tell/answer
+            if action in ["tell_object_property_on_place", "tell_obj_prop_on_place"]:
+                put("destination_place", a.get("place"))  # question refers to place
+                # comparison/prop is not in fixed slots; store in extras later
 
         return slots
+
+    def _coarse_intent_type(self, command_kind: str, steps_v1: list) -> str:
+        """Prefer composite when multi-step; otherwise infer from kind/actions."""
+        if len(steps_v1) >= 2:
+            return "composite"
+
+        k = (command_kind or "").lower()
+        actions = " ".join([(s.get("action", "") or "").lower() for s in steps_v1])
+        key = (k + " " + actions).strip()
+
+        if any(w in key for w in ["guide"]):
+            return "guide"
+        if any(w in key for w in ["tell", "answer", "describe", "count", "question"]):
+            return "answer"
+        if any(w in key for w in ["bring", "deliver", "give", "fetch"]):
+            return "bring"
+        if any(w in key for w in ["find"]):
+            return "find"
+        if any(w in key for w in ["place", "put"]):
+            return "place"
+        return "other"
 
     def _publish(self, payload: dict):
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         self.pub_intent.publish(msg)
 
-    # ----------------------------
-    # Utterance-end driven parse
-    # ----------------------------
     def _on_utt_end(self, msg: Bool):
-        # Expect utterance_end pulse True
+        # Trigger on True pulse
         if not bool(msg.data):
             return
 
@@ -274,102 +263,104 @@ class GpsrParserNode:
         age = (now - self._latest_text_stamp).to_sec()
         text = (self._latest_text or "").strip()
 
-        if (not text) or (age > self.max_text_age_sec):
-            rospy.logwarn(
-                "gpsr_parser_node: utterance_end but no fresh text (age=%.3f, text='%s')",
-                age, text
-            )
+        if not text or age > self.max_text_age_sec:
+            rospy.logwarn("utterance_end but no fresh text (age=%.3f)", age)
             return
 
-        # Optional confidence gating
-        if self.min_confidence >= 0.0 and self._latest_conf is not None:
-            if self._latest_conf < self.min_confidence:
-                payload = {
-                    "schema": "gpsr_intent_v1",
-                    "ok": False,
-                    "need_confirm": True,
-                    "intent_type": "other",
-                    "slots": self._empty_fixed_slots(),
-                    "raw_text": text,
-                    "normalized_text": self._normalize_text(text),
-                    "confidence": self._latest_conf,
-                    "source": "parser",
-                    "error": "need_confirm_low_confidence",
-                    "command_kind": None,
-                    "steps": [],
-                    "context": {"lang": "en", "source": "parser"},
-                }
-                self._publish(payload)
-                rospy.logwarn(
-                    "gpsr_parser_node: low confidence %.3f < %.3f -> need_confirm",
-                    self._latest_conf, self.min_confidence
-                )
-                return
-
-        rospy.loginfo("gpsr_parser_node: finalize parse text='%s'", text)
-
-        command = self.parser.parse(text)
-        if command is None:
+        # confidence gating
+        if self.min_confidence >= 0.0 and self._latest_conf is not None and self._latest_conf < self.min_confidence:
             payload = {
                 "schema": "gpsr_intent_v1",
                 "ok": False,
-                "need_confirm": False,
+                "need_confirm": True,
                 "intent_type": "other",
-                "slots": self._empty_fixed_slots(),
                 "raw_text": text,
                 "normalized_text": self._normalize_text(text),
-                "confidence": self._latest_conf,
+                "confidence": {"asr": self._latest_conf, "parser": None},
                 "source": "parser",
-                "error": "parse_failed",
                 "command_kind": None,
+                "slots": self._empty_fixed_slots(),
                 "steps": [],
-                "context": {"lang": "en", "source": "parser"},
+                "extras": {"error": "low_confidence"},
             }
             self._publish(payload)
             return
 
-        # Parser -> v1 unified schema
-        # NOTE: your parser currently provides command.to_json() with keys:
-        #   kind, steps[{action, fields}], ...
+        rospy.loginfo("parse: %s", text)
+        cmd = self.parser.parse(text)
+        if cmd is None:
+            payload = {
+                "schema": "gpsr_intent_v1",
+                "ok": False,
+                "need_confirm": True,
+                "intent_type": "other",
+                "raw_text": text,
+                "normalized_text": self._normalize_text(text),
+                "confidence": {"asr": self._latest_conf, "parser": None},
+                "source": "parser",
+                "command_kind": None,
+                "slots": self._empty_fixed_slots(),
+                "steps": [],
+                "extras": {"error": "parse_failed"},
+            }
+            self._publish(payload)
+            return
+
+        # If parser already has v1 method, use it
+        if hasattr(cmd, "to_intent_v1"):
+            payload = cmd.to_intent_v1()
+            # Ensure minimal fields exist
+            payload.setdefault("schema", "gpsr_intent_v1")
+            payload.setdefault("raw_text", text)
+            payload.setdefault("normalized_text", self._normalize_text(text))
+            payload.setdefault("confidence", {"asr": self._latest_conf, "parser": None})
+            self._publish(payload)
+            return
+
+        # Legacy parser json
         try:
-            cmd_dict = json.loads(command.to_json())
+            legacy = json.loads(cmd.to_json())
         except Exception as e:
-            rospy.logerr("gpsr_parser_node: command.to_json() decode failed: %s", str(e))
             payload = {
                 "schema": "gpsr_intent_v1",
                 "ok": False,
-                "need_confirm": False,
+                "need_confirm": True,
                 "intent_type": "other",
-                "slots": self._empty_fixed_slots(),
                 "raw_text": text,
                 "normalized_text": self._normalize_text(text),
-                "confidence": self._latest_conf,
+                "confidence": {"asr": self._latest_conf, "parser": None},
                 "source": "parser",
-                "error": "command_json_decode_failed",
                 "command_kind": None,
+                "slots": self._empty_fixed_slots(),
                 "steps": [],
-                "context": {"lang": "en", "source": "parser"},
+                "extras": {"error": "legacy_json_decode_failed", "detail": str(e)},
             }
             self._publish(payload)
             return
 
-        command_kind = cmd_dict.get("kind")
-        steps_v1 = self._ensure_steps_args(cmd_dict.get("steps", []))
-        slots_v1 = self._extract_fixed_slots_from_steps(steps_v1)
+        command_kind = legacy.get("kind") or legacy.get("command_kind")
+        steps_v1 = self._ensure_steps_args(legacy.get("steps", []))
+        slots_v1 = self._extract_slots_from_steps(steps_v1)
+
+        # Preserve legacy slots/fields that are not in the fixed set
+        extras = {}
+        if isinstance(legacy.get("slots"), dict):
+            extras["legacy_slots"] = legacy["slots"]
+        extras["legacy"] = {k: legacy.get(k) for k in ["kind", "command_kind"] if k in legacy}
 
         payload = {
             "schema": "gpsr_intent_v1",
             "ok": True,
             "need_confirm": False,
             "intent_type": self._coarse_intent_type(command_kind, steps_v1),
-            "slots": slots_v1,
             "raw_text": text,
             "normalized_text": self._normalize_text(text),
-            "confidence": self._latest_conf,
+            "confidence": {"asr": self._latest_conf, "parser": None},
             "source": "parser",
             "command_kind": command_kind,
+            "slots": slots_v1,
             "steps": steps_v1,
-            "context": {"lang": "en", "source": "parser"},
+            "extras": extras,
         }
         self._publish(payload)
 
@@ -377,7 +368,7 @@ class GpsrParserNode:
 def main():
     rospy.init_node("gpsr_parser_node")
     _ = GpsrParserNode()
-    rospy.loginfo("gpsr_parser_node started (utterance_end driven, gpsr_intent_v1 fixed schema).")
+    rospy.loginfo("gpsr_parser_node(patched_v1) started.")
     rospy.spin()
 
 
