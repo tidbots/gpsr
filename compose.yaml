@@ -32,6 +32,8 @@ services:
       # 将来 GUI ツールを使うなら X11 も共有しておくと便利
       - /tmp/.X11-unix:/tmp/.X11-unix
       - hf_cache:/models
+volumes:
+  hf_cache:
       
     # 必要ならホスト側 UID/GID を合わせて動かすことも可能
     # user: "1000:1000"
