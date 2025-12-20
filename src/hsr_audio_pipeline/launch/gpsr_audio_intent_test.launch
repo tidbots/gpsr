@@ -81,7 +81,7 @@
 
     <param name="max_text_age_sec" value="30.0" />
     <param name="min_confidence" value="-1.0" />
-    <param name="debounce_same_text_sec" value="0.8" />
+    <param name="debounce_same_text_sec" value="1.5" />
   </node>
 
   <!-- =======================
