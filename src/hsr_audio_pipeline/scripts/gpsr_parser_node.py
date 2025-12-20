@@ -148,6 +148,8 @@ class GpsrParserNode:
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
 
         self.max_text_age_sec = float(rospy.get_param("~max_text_age_sec", 1.0))
+        self.utt_end_retry_count = int(rospy.get_param("~utt_end_retry_count", 8))
+        self.utt_end_retry_sleep = float(rospy.get_param("~utt_end_retry_sleep", 0.02))
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
         # Vocabulary externalization
@@ -240,6 +242,17 @@ class GpsrParserNode:
         now = rospy.Time.now()
         age = (now - self._latest_text_stamp).to_sec()
         text = (self._latest_text or "").strip()
+
+        # Race guard: utterance_end may arrive slightly before the last /gpsr/asr/text message.
+        if (not text) or (age > self.max_text_age_sec):
+            for _ in range(self.utt_end_retry_count):
+                rospy.sleep(self.utt_end_retry_sleep)
+                now = rospy.Time.now()
+                age = (now - self._latest_text_stamp).to_sec()
+                text = (self._latest_text or "").strip()
+                if text and (age <= self.max_text_age_sec):
+                    break
+
         if (not text) or (age > self.max_text_age_sec):
             rospy.logwarn("gpsr_parser_node: utterance_end but no fresh text (age=%.3f, text='%s')", age, text)
             return
