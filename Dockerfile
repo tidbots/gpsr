@@ -63,6 +63,9 @@ RUN . /opt/ros/noetic/setup.sh \
 RUN echo "source /opt/ros/noetic/setup.bash" >> /home/${USER_NAME}/.bashrc \
  && echo "source /hsr_ws/devel/setup.bash" >> /home/${USER_NAME}/.bashrc
 
+RUN mkdir -p /models/hf \
+ && chown -R ${UID}:${GID} /models
+ 
 USER ${USER_NAME}
 WORKDIR /home/${USER_NAME}
 
