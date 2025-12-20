@@ -141,6 +141,7 @@ class GpsrParserNode:
         "take_object": ("composite", "takeObj"),
         "find_object_in_room": ("composite", "findObjInRoom"),
         "go_to_location": ("composite", "goToLoc"),
+        "follow_person_to_dest": ("guide", "followPersonToDest"),
     }
 
     def __init__(self):
@@ -405,6 +406,13 @@ class GpsrParserNode:
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural"))
 
+            # find_object_in_room → source_room / object_category
+            if action == "find_object_in_room":
+                set_if_empty("source_room", args.get("room"))
+                # args に object_or_category があれば拾う（物体/カテゴリ探索）
+                if args.get("object_or_category"):
+                    set_if_empty("object_category", args.get("object_or_category"))
+
             # greet_person_with_clothes_in_room → source_room, attribute
             if action == "greet_person_with_clothes_in_room":
                 set_if_empty("source_room", args.get("room"))
@@ -413,6 +421,15 @@ class GpsrParserNode:
             # place_object_on_place → destination_place
             if action == "place_object_on_place":
                 set_if_empty("destination_place", args.get("place"))
+
+            # follow_person_to_dest → destination_place (location)
+            if action == "follow_person_to_dest":
+                set_if_empty("destination_place", args.get("location"))
+                if args.get("person_filter"):
+                    set_if_empty("person", args.get("person_filter"))
+                # ルールブック表現を attribute に寄せる（最低限）
+                if args.get("person_filter"):
+                    set_if_empty("attribute", args.get("person_filter"))
 
             # go_to_location → source_room (room) に寄せる
             if action == "go_to_location":
