@@ -38,6 +38,10 @@
        ======================= -->
   <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py"
         name="faster_whisper_asr_node" output="screen">
+    <param name="model_cache_dir" value="/models/hf" />
+    <!-- 任意：完全ローカル指定（存在すればDLなしでそこから読む） -->
+    <param name="model_path" value="/models/whisper/small" />
+
     <param name="audio_topic" value="/audio/audio" />
     <param name="vad_topic"   value="/vad/is_speech" />
     <param name="sample_rate" value="16000" />
