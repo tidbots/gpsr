@@ -7,6 +7,7 @@ import json
 import time
 import threading
 import yaml
+import re
 import rospy
 from std_msgs.msg import String, Bool, Float32
 
@@ -41,9 +42,7 @@ def _collapse_duplicated_sentence(text: str) -> str:
     t = _normalize_ws(text)
     if not t:
         return t
-    # 末尾の句点/ピリオドを正規化https://github.com/tidbots/gpsr/blob/main/src/hsr_audio_pipeline/scripts/gpsr_parser_node.py
     t2 = t.replace("..", ".")
-    # "A. A." パターン（完全一致）だけ畳む
     parts = [p.strip() for p in t2.split(".") if p.strip()]
     if len(parts) == 2 and parts[0].lower() == parts[1].lower():
         return parts[0] + "."
@@ -55,11 +54,8 @@ def _place_to_name(x):
     if x is None:
         return None
     if isinstance(x, str):
-        # "{'name': 'xxx', 'placement': True}" のような文字列化dictも吸収
         s = x.strip()
         if s.startswith("{") and "name" in s:
-            # 雑だけど安全寄りに抽出
-            import re
             m = re.search(r"'name'\s*:\s*'([^']+)'", s)
             if m:
                 return m.group(1)
@@ -68,7 +64,6 @@ def _place_to_name(x):
         if "name" in x:
             return _normalize_ws(str(x["name"])) or None
         return _normalize_ws(str(x)) or None
-    # オブジェクトで name 属性を持つ場合
     if hasattr(x, "name"):
         try:
             return _normalize_ws(str(getattr(x, "name"))) or None
@@ -88,11 +83,8 @@ def _safe_to_dict(obj):
             return json.loads(obj)
         except Exception:
             return {"raw": obj}
-    # dataclass / object
     if hasattr(obj, "__dict__"):
-        d = dict(obj.__dict__)
-        return d
-    # fallback: attributes
+        return dict(obj.__dict__)
     d = {}
     for k in ["ok", "need_confirm", "intent_type", "command_kind", "slots", "steps"]:
         if hasattr(obj, k):
@@ -101,6 +93,74 @@ def _safe_to_dict(obj):
             except Exception:
                 pass
     return d
+
+
+def _safe_read(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects_md: str, test_objects_md: str = ""):
+    """
+    /data/vocab/*.md から語彙を生成（generator系の表形式を想定）
+      - names.md
+      - room_names.md
+      - location_names.md (末尾 (p) は placement)
+      - objects.md (# Class plural singular ... / table)
+      - test_objects.md (任意：hotwords増量用途だが parser 側でも objectsに加えてOK)
+    返り値は parser_node が期待する辞書形式：
+      person_names, room_names, location_names, placement_location_names,
+      object_names, object_categories_plural, object_categories_singular
+    """
+    # names
+    names = re.findall(r"\|\s*([A-Za-z]+)\s*\|", _safe_read(names_md))
+    names = [x.strip() for x in names][1:] if names else []
+
+    # rooms
+    rooms = re.findall(r"\|\s*(\w+ \w*)\s*\|", _safe_read(rooms_md))
+    rooms = [x.strip() for x in rooms][1:] if rooms else []
+
+    # locations (+ placement)
+    loc_pairs = re.findall(r"\|\s*([0-9]+)\s*\|\s*([A-Za-z,\s\(\)]+)\|", _safe_read(locations_md))
+    locs = [b.strip() for (_, b) in loc_pairs]
+    placement = [x.replace("(p)", "").strip() for x in locs if x.strip().endswith("(p)")]
+    locs = [x.replace("(p)", "").strip() for x in locs]
+
+    # objects + categories
+    md_obj = _safe_read(objects_md)
+    obj_names = re.findall(r"\|\s*(\w+)\s*\|", md_obj)
+    obj_names = [o for o in obj_names if o != "Objectname"]
+    obj_names = [o.replace("_", " ").strip() for o in obj_names if o.strip()]
+
+    cats = re.findall(r"# Class \s*([\w,\s\(\)]+)\s*", md_obj)
+    cats = [c.strip().replace("(", "").replace(")", "") for c in cats]
+    cat_plur, cat_sing = [], []
+    for c in cats:
+        parts = c.split()
+        if len(parts) >= 2:
+            cat_plur.append(parts[0].replace("_", " "))
+            cat_sing.append(parts[1].replace("_", " "))
+
+    # test_objects (任意)
+    if test_objects_md and os.path.exists(test_objects_md):
+        md_test = _safe_read(test_objects_md)
+        test_objs = re.findall(r"\|\s*(\w+)\s*\|", md_test)
+        test_objs = [o for o in test_objs if o != "Objectname"]
+        test_objs = [o.replace("_", " ").strip() for o in test_objs if o.strip()]
+        obj_names = sorted(set(obj_names + test_objs))
+
+    return dict(
+        person_names=[n for n in names if n],
+        room_names=[r for r in rooms if r],
+        location_names=[l for l in locs if l],
+        placement_location_names=sorted(set([p for p in placement if p])),
+        object_names=sorted(set([o for o in obj_names if o])),
+        object_categories_plural=sorted(set([x for x in cat_plur if x])),
+        object_categories_singular=sorted(set([x for x in cat_sing if x])),
+    )
 
 
 class GpsrParserNode:
@@ -155,7 +215,18 @@ class GpsrParserNode:
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
 
         self.lang = rospy.get_param("~lang", "en")
-        self.vocab_yaml = rospy.get_param("~vocab_yaml", "/data/vocab/vocab.yaml")
+
+        # --- vocab paths ---
+        self.vocab_dir = rospy.get_param("~vocab_dir", "/data/vocab")
+        self.vocab_yaml = rospy.get_param("~vocab_yaml", os.path.join(self.vocab_dir, "vocab.yaml"))
+
+        # MD vocab (preferred if all exist)
+        self.names_md = rospy.get_param("~names_md", os.path.join(self.vocab_dir, "names.md"))
+        self.rooms_md = rospy.get_param("~rooms_md", os.path.join(self.vocab_dir, "room_names.md"))
+        self.locations_md = rospy.get_param("~locations_md", os.path.join(self.vocab_dir, "location_names.md"))
+        self.objects_md = rospy.get_param("~objects_md", os.path.join(self.vocab_dir, "objects.md"))
+        self.test_objects_md = rospy.get_param("~test_objects_md", os.path.join(self.vocab_dir, "test_objects.md"))
+
         self.max_text_age = float(rospy.get_param("~max_text_age_sec", 1.0))
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
@@ -173,7 +244,33 @@ class GpsrParserNode:
         self._last_pub_wall = 0.0
         self._pub_lock = threading.Lock()
 
-        vocab = self._load_vocab(self.vocab_yaml)
+        # ---- load vocab (MD preferred; YAML fallback) ----
+        use_md = all([
+            self.names_md and os.path.exists(self.names_md),
+            self.rooms_md and os.path.exists(self.rooms_md),
+            self.locations_md and os.path.exists(self.locations_md),
+            self.objects_md and os.path.exists(self.objects_md),
+        ])
+
+        vocab = None
+        if use_md:
+            try:
+                vocab = _load_vocab_from_md(
+                    self.names_md,
+                    self.rooms_md,
+                    self.locations_md,
+                    self.objects_md,
+                    self.test_objects_md
+                )
+                rospy.loginfo("gpsr_parser_node: vocab loaded from MD dir=%s", self.vocab_dir)
+            except Exception as e:
+                rospy.logwarn("gpsr_parser_node: failed to load MD vocab (fallback to YAML): %s", e)
+                vocab = None
+
+        if vocab is None:
+            vocab = self._load_vocab(self.vocab_yaml)
+            rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
+
         # 重要：複合語優先（desk lamp が desk より先にマッチ）
         vocab["location_names"] = sorted(vocab["location_names"], key=lambda s: (-len(s), s.lower()))
         vocab["placement_location_names"] = sorted(vocab["placement_location_names"], key=lambda s: (-len(s), s.lower()))
@@ -199,8 +296,14 @@ class GpsrParserNode:
         except Exception:
             pass
 
-        rospy.loginfo("gpsr_parser_node ready (text=%s, utt_end=%s, vocab=%s)",
-                      self.text_topic, self.utt_end_topic, self.vocab_yaml or "defaults")
+        rospy.loginfo(
+            "gpsr_parser_node ready (text=%s, utt_end=%s, vocab_dir=%s, yaml=%s, md=%s)",
+            self.text_topic,
+            self.utt_end_topic,
+            self.vocab_dir,
+            self.vocab_yaml or "none",
+            "on" if use_md else "off"
+        )
 
     def _load_vocab(self, yaml_path: str):
         if yaml_path and os.path.exists(yaml_path):
@@ -248,7 +351,7 @@ class GpsrParserNode:
                 object_categories_singular=sorted(set([x for x in cats_s if x])),
             )
 
-        # fallback minimal
+        # fallback minimal（元コードのまま）
         return dict(
             person_names=["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"],
             room_names=["bedroom", "kitchen", "living room", "office", "bathroom"],
@@ -295,6 +398,7 @@ class GpsrParserNode:
             return
 
         raw = _collapse_duplicated_sentence(self._latest_text)
+
         # debounce: skip same text arriving twice (ASR repeat / utterance_end double-fire)
         norm = raw.lower().strip()
         now_wall = time.time()
@@ -302,7 +406,9 @@ class GpsrParserNode:
             if self.debounce_same_text_sec > 0 and norm and norm == self._last_pub_norm and (now_wall - self._last_pub_wall) < self.debounce_same_text_sec:
                 rospy.logwarn("gpsr_parser_node: debounce skip (dt=%.3f, text='%s')", now_wall - self._last_pub_wall, norm)
                 return
-        
+            self._last_pub_norm = norm
+            self._last_pub_wall = now_wall
+
         rospy.loginfo("parse: %s", raw.lower())
 
         try:
@@ -377,7 +483,6 @@ class GpsrParserNode:
                 a["from_place"] = _place_to_name(a.get("from_place"))
             if "to_place" in a:
                 a["to_place"] = _place_to_name(a.get("to_place"))
-            # other location fields
             if "location" in a:
                 a["location"] = _place_to_name(a.get("location"))
             if "source_location" in a:
@@ -420,7 +525,6 @@ class GpsrParserNode:
             if action in ("answer_to_person_in_room", "talk_to_person_in_room"):
                 set_if_empty("gesture", "raising right arm" if "right arm" in str(args.get("person_filter","")) else None)
                 set_if_empty("destination_room", args.get("room"))
-                # ルールブック表現を attribute に寄せる（最低限）
                 if "person_filter" in args:
                     set_if_empty("attribute", args.get("person_filter"))
 
@@ -430,52 +534,48 @@ class GpsrParserNode:
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural"))
 
-            # find_object_in_room → source_room / object_category
+            # find_object_in_room
             if action == "find_object_in_room":
                 set_if_empty("source_room", args.get("room"))
-                # args に object_or_category があれば拾う（物体/カテゴリ探索）
                 if args.get("object_or_category"):
                     set_if_empty("object_category", args.get("object_or_category"))
 
-            # greet_person_with_clothes_in_room → source_room, attribute
+            # greet_person_with_clothes_in_room
             if action == "greet_person_with_clothes_in_room":
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("attribute", args.get("clothes_description"))
 
-            # place_object_on_place → destination_place
+            # place_object_on_place
             if action == "place_object_on_place":
                 set_if_empty("destination_place", args.get("place"))
 
-            # follow_person_to_dest → destination_place (location)
+            # follow_person_to_dest
             if action == "follow_person_to_dest":
                 set_if_empty("destination_place", args.get("location"))
                 if args.get("person_filter"):
                     set_if_empty("person", args.get("person_filter"))
-                # ルールブック表現を attribute に寄せる（最低限）
-                if args.get("person_filter"):
                     set_if_empty("attribute", args.get("person_filter"))
 
-            # go_to_location → source_room (room) に寄せる
+            # go_to_location
             if action == "go_to_location":
                 set_if_empty("source_room", args.get("room"))
 
-            # tell_category_property_on_place → answer: category property on place
+            # tell_category_property_on_place
             if action == "tell_category_property_on_place":
                 set_if_empty("question_type", "category_property")
                 set_if_empty("comparison", args.get("comparison"))
                 set_if_empty("object_category", args.get("object_category"))
                 set_if_empty("source_place", args.get("place"))
 
-            # tell_person_info → answer: person info in room/location
+            # tell_person_info
             if action == "tell_person_info":
                 set_if_empty("question_type", "person_info")
                 set_if_empty("attribute", args.get("person_info"))
                 set_if_empty("source_room", args.get("room"))
-                # locationがあれば place に
                 if args.get("location"):
                     set_if_empty("source_place", args.get("location"))
 
-            # tell_person_info_from_loc_to_loc → answer: person info source_loc → target_loc
+            # tell_person_info_from_loc_to_loc
             if action == "tell_person_info_from_loc_to_loc":
                 set_if_empty("question_type", "person_info")
                 set_if_empty("attribute", args.get("person_info"))
