@@ -110,7 +110,7 @@ def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects
       - room_names.md
       - location_names.md (末尾 (p) は placement)
       - objects.md (# Class plural singular ... / table)
-      - test_objects.md (任意：hotwords増量用途だが parser 側でも objectsに加えてOK)
+      - test_objects.md (任意)
     返り値は parser_node が期待する辞書形式：
       person_names, room_names, location_names, placement_location_names,
       object_names, object_categories_plural, object_categories_singular
@@ -181,14 +181,11 @@ class GpsrParserNode:
         "gesture",
     ]
 
-    # action -> intent_type / command_kind / slot補完ルール
     ACTION_HINTS = {
-        # bring系
         "bring_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
         "deliver_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
         "take_object_from_place": ("bring", "takeObjFromPlcmt"),
         "deliver_object_to_person_in_room": ("bring", "deliverObjToPrsInRoom"),
-        # answer / talk
         "answer_to_person_in_room": ("answer", "answerToPrsInRoom"),
         "talk_to_person_in_room": ("answer", "talkInfoToGestPrsInRoom"),
         "count_persons_in_room": ("answer", "countPrsInRoom"),
@@ -196,11 +193,9 @@ class GpsrParserNode:
         "tell_category_property_on_place": ("answer", "tellCatPropOnPlcmt"),
         "tell_person_info": ("answer", "tellPersonInfoInRoom"),
         "tell_person_info_from_loc_to_loc": ("answer", "tellPersonInfoFromLocToLoc"),
-        # guide/greet
         "guide_named_person_from_place_to_place": ("guide", "guideNameFromBeacToBeac"),
         "guide_person_to_dest": ("guide", "guidePersonToDest"),
         "greet_person_with_clothes_in_room": ("composite", "greetClothDscInRm"),
-        # place/manip
         "place_object_on_place": ("composite", "placeObjOnPlcmt"),
         "take_object": ("composite", "takeObj"),
         "find_object_in_room": ("composite", "findObjInRoom"),
@@ -227,10 +222,9 @@ class GpsrParserNode:
         self.objects_md = rospy.get_param("~objects_md", os.path.join(self.vocab_dir, "objects.md"))
         self.test_objects_md = rospy.get_param("~test_objects_md", os.path.join(self.vocab_dir, "test_objects.md"))
 
-        self.max_text_age = float(rospy.get_param("~max_text_age_sec", 1.0))
+        self.max_text_age = float(rospy.get_param("~max_text_age_sec", 30.0))
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
-        # utterance_end arrives before text sometimes → retry a bit
         self.utt_retry_count = int(rospy.get_param("~utt_end_retry_count", 8))
         self.utt_retry_sleep = float(rospy.get_param("~utt_end_retry_sleep", 0.02))
 
@@ -238,8 +232,7 @@ class GpsrParserNode:
         self._latest_text_stamp = rospy.Time(0)
         self._latest_conf = None
 
-        # debounce duplicated publishes (same normalized text within window)
-        self.debounce_same_text_sec = float(rospy.get_param("~debounce_same_text_sec", 0.8))
+        self.debounce_same_text_sec = float(rospy.get_param("~debounce_same_text_sec", 1.5))
         self._last_pub_norm = ""
         self._last_pub_wall = 0.0
         self._pub_lock = threading.Lock()
@@ -268,8 +261,13 @@ class GpsrParserNode:
                 vocab = None
 
         if vocab is None:
-            vocab = self._load_vocab(self.vocab_yaml)
+            vocab = self._load_vocab_yaml(self.vocab_yaml)
             rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
+
+        # --- local sets for slot classification ---
+        # normalize to lowercase for robust compare
+        self._obj_set = set([s.strip().lower() for s in vocab["object_names"] if isinstance(s, str)])
+        self._cat_set = set([s.strip().lower() for s in (vocab["object_categories_singular"] + vocab["object_categories_plural"]) if isinstance(s, str)])
 
         # 重要：複合語優先（desk lamp が desk より先にマッチ）
         vocab["location_names"] = sorted(vocab["location_names"], key=lambda s: (-len(s), s.lower()))
@@ -305,7 +303,7 @@ class GpsrParserNode:
             "on" if use_md else "off"
         )
 
-    def _load_vocab(self, yaml_path: str):
+    def _load_vocab_yaml(self, yaml_path: str):
         if yaml_path and os.path.exists(yaml_path):
             with open(yaml_path, "r", encoding="utf-8") as f:
                 y = yaml.safe_load(f) or {}
@@ -351,7 +349,7 @@ class GpsrParserNode:
                 object_categories_singular=sorted(set([x for x in cats_s if x])),
             )
 
-        # fallback minimal（元コードのまま）
+        # fallback minimal
         return dict(
             person_names=["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"],
             room_names=["bedroom", "kitchen", "living room", "office", "bathroom"],
@@ -370,7 +368,6 @@ class GpsrParserNode:
         self._latest_conf = float(msg.data)
 
     def _wait_for_text_if_needed(self):
-        """utterance_endが先に来た場合に少しだけ待つ"""
         for _ in range(max(0, self.utt_retry_count)):
             if self._latest_text:
                 return
@@ -380,7 +377,6 @@ class GpsrParserNode:
         if not msg.data:
             return
 
-        # race対策：少し待つ
         if not self._latest_text:
             self._wait_for_text_if_needed()
 
@@ -398,8 +394,6 @@ class GpsrParserNode:
             return
 
         raw = _collapse_duplicated_sentence(self._latest_text)
-
-        # debounce: skip same text arriving twice (ASR repeat / utterance_end double-fire)
         norm = raw.lower().strip()
         now_wall = time.time()
         with self._pub_lock:
@@ -439,7 +433,6 @@ class GpsrParserNode:
             "context": {"lang": self.lang, "source": "parser"},
         }
 
-        # steps 抽出（dict/obj 両対応）
         steps_in = parsed.get("steps") or []
         norm_steps = []
         for s in steps_in:
@@ -467,7 +460,7 @@ class GpsrParserNode:
         if not payload["intent_type"]:
             payload["intent_type"] = "other"
 
-        # slots補完（最小限）
+        # slots補完（ここが今回の本丸：object/category 振り分け）
         self._fill_slots_from_steps(payload)
 
         # place文字列化（dict混入対策）
@@ -477,20 +470,39 @@ class GpsrParserNode:
         # steps 内の place/from/to の dict も正規化
         for st in payload["steps"]:
             a = st.get("args", {})
-            if "place" in a:
-                a["place"] = _place_to_name(a.get("place"))
-            if "from_place" in a:
-                a["from_place"] = _place_to_name(a.get("from_place"))
-            if "to_place" in a:
-                a["to_place"] = _place_to_name(a.get("to_place"))
-            if "location" in a:
-                a["location"] = _place_to_name(a.get("location"))
-            if "source_location" in a:
-                a["source_location"] = _place_to_name(a.get("source_location"))
-            if "target_location" in a:
-                a["target_location"] = _place_to_name(a.get("target_location"))
+            for key in ["place", "from_place", "to_place", "location", "source_location", "target_location", "source_place", "destination_place"]:
+                if key in a:
+                    a[key] = _place_to_name(a.get(key))
 
         return payload
+
+    # ---------- NEW: object/category classifier ----------
+    def _classify_obj_or_cat(self, s: str):
+        """
+        object_or_category を object / category に振り分ける。
+        - object_names に一致 → ("object", value)
+        - category（sing/plur）に一致 → ("category", value)
+        - どちらにも一致しない → ("category", value) へ寄せる（GPSRの安全側）
+        """
+        if not s:
+            return None, None
+        v = _normalize_ws(str(s)).lower()
+        if not v:
+            return None, None
+
+        if v in self._obj_set:
+            return "object", _normalize_ws(str(s))
+        if v in self._cat_set:
+            return "category", _normalize_ws(str(s))
+
+        # 形が近い場合（単数/複数の s 付与など）
+        if v.endswith("s") and v[:-1] in self._cat_set:
+            return "category", _normalize_ws(str(s))
+        if (v + "s") in self._cat_set:
+            return "category", _normalize_ws(str(s))
+
+        # fallback: categoryへ
+        return "category", _normalize_ws(str(s))
 
     def _fill_slots_from_steps(self, payload: dict):
         slots = payload["slots"]
@@ -507,23 +519,34 @@ class GpsrParserNode:
             args = st.get("args", {})
 
             # bring_object_to_operator
-            if action in ("bring_object_to_operator",):
-                set_if_empty("object", args.get("object"))
+            if action == "bring_object_to_operator":
+                obj = args.get("object")
+                if obj:
+                    kind, val = self._classify_obj_or_cat(obj)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
                 set_if_empty("source_place", args.get("source_place") or args.get("place"))
 
-            # take_object_from_place
-            if action in ("take_object_from_place",):
-                set_if_empty("object_category", args.get("object_or_category"))
+            # take_object_from_place（カテゴリ指定が多い）
+            if action == "take_object_from_place":
+                oc = args.get("object_or_category")
+                if oc:
+                    kind, val = self._classify_obj_or_cat(oc)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
                 set_if_empty("source_place", args.get("place"))
 
             # deliver_object_to_person_in_room
-            if action in ("deliver_object_to_person_in_room",):
+            if action == "deliver_object_to_person_in_room":
                 set_if_empty("person", args.get("person_filter"))
                 set_if_empty("destination_room", args.get("room"))
 
-            # answer_to_person_in_room / talk_to_person_in_room
+            # answer/talk
             if action in ("answer_to_person_in_room", "talk_to_person_in_room"):
-                set_if_empty("gesture", "raising right arm" if "right arm" in str(args.get("person_filter","")) else None)
                 set_if_empty("destination_room", args.get("room"))
                 if "person_filter" in args:
                     set_if_empty("attribute", args.get("person_filter"))
@@ -534,11 +557,16 @@ class GpsrParserNode:
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural"))
 
-            # find_object_in_room
+            # find_object_in_room（ここが重要：object_or_category を分類）
             if action == "find_object_in_room":
                 set_if_empty("source_room", args.get("room"))
-                if args.get("object_or_category"):
-                    set_if_empty("object_category", args.get("object_or_category"))
+                oc = args.get("object_or_category")
+                if oc:
+                    kind, val = self._classify_obj_or_cat(oc)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
 
             # greet_person_with_clothes_in_room
             if action == "greet_person_with_clothes_in_room":
@@ -548,6 +576,14 @@ class GpsrParserNode:
             # place_object_on_place
             if action == "place_object_on_place":
                 set_if_empty("destination_place", args.get("place"))
+                # もし placeステップに object が付く場合にも対応
+                obj = args.get("object")
+                if obj and slots.get("object") is None and slots.get("object_category") is None:
+                    kind, val = self._classify_obj_or_cat(obj)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
 
             # follow_person_to_dest
             if action == "follow_person_to_dest":
@@ -564,7 +600,10 @@ class GpsrParserNode:
             if action == "tell_category_property_on_place":
                 set_if_empty("question_type", "category_property")
                 set_if_empty("comparison", args.get("comparison"))
-                set_if_empty("object_category", args.get("object_category"))
+                oc = args.get("object_category")
+                if oc:
+                    # ここはカテゴリとして扱う
+                    set_if_empty("object_category", _normalize_ws(str(oc)))
                 set_if_empty("source_place", args.get("place"))
 
             # tell_person_info
