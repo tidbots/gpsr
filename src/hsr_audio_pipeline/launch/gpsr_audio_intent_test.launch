@@ -45,6 +45,7 @@
     <param name="sample_rate" value="16000" />
     <param name="sample_width" value="2" />
     <param name="channels" value="1" />
+　　<param name="raw_text_topic" value="/gpsr/asr/raw_text" />
 
     <!-- GPSR ASR outputs（※差し替え版のparam名に合わせる） -->
     <param name="text_topic"          value="/gpsr/asr/text" />
