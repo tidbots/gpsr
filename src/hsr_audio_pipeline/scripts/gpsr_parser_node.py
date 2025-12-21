@@ -156,6 +156,7 @@ class GpsrParserNode:
     ACTION_HINTS = {
         "bring_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
         "deliver_object_to_person_in_room": ("bring", "deliverObjToPrsInRoom"),
+        "deliver_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
         "answer_to_person_in_room": ("answer", "answerToPrsInRoom"),
         "talk_to_person_in_room": ("answer", "talkInfoToGestPrsInRoom"),
         "count_persons_in_room": ("answer", "countPrsInRoom"),
