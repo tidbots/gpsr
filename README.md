@@ -145,6 +145,20 @@ Tell me how many food there are on the sink
  "slots": {"object": "テーブルの上のペットボトル", "source": "", "destination": "", "person": ""}}
 ```
 
+
+## 誤認識ログを使って品質を改良する
+ロガー　gpsr_asr_logger.py
+```
+rosrun hsr_audio_pipeline gpsr_asr_logger.py _our_dir:=/home/roboworks/logs/gpsr
+```
+utterace_end=Trueのたびに
+```
+{"ts":"...","text":"bring me a plum from the tv stand.","confidence":0.43}
+```
+
+
+
+
 ## デバッグ
 命令文を直接配信する
 ```
