@@ -31,7 +31,8 @@ catkin_install_python(
     scripts/gpsr_intent_echo.py
     scripts/apply_corrections_example.py
     scripts/corrections_candidates.py
-    scripts/gen_corrections.py    
+    scripts/gen_corrections.py 
+    scripts/gpsr_asr_logger.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
