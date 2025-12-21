@@ -224,7 +224,6 @@ class GpsrParserNode:
             vocab = self._load_vocab_yaml(self.vocab_yaml)
             rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
 
-        # lowercase sets for classification
         self._obj_set = set([s.strip().lower() for s in vocab["object_names"] if isinstance(s, str)])
         self._cat_set = set([s.strip().lower() for s in (vocab["object_categories_singular"] + vocab["object_categories_plural"]) if isinstance(s, str)])
 
@@ -372,7 +371,7 @@ class GpsrParserNode:
         payload = self._coerce_to_v1(parsed_obj, raw)
         self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
-    # ---------- object/category classifier ----------
+    # ---------- classifier ----------
     def _classify_obj_or_cat(self, s: str):
         if not s:
             return None, None
@@ -392,85 +391,88 @@ class GpsrParserNode:
 
         return "category", _normalize_ws(str(s))
 
-    # ---------- NEW: reference resolver ----------
-    def _apply_reference_resolution(self, steps: list) -> dict:
+    # ---------- NEW: unify args to object/object_category ----------
+    def _canonicalize_object_fields(self, args: dict) -> dict:
         """
-        it/them 参照解決：
-        - 直前に確定した object / object_category を state として保持
-        - take/place/bring/deliver 等で省略されていたら補完
-        返り値: state {"object": str|None, "object_category": str|None}
+        args の object系キーを正規化する。
+        ルール：
+          - object_or_category があれば分類して object or object_category に移す
+          - object があってもカテゴリなら object_category に寄せる（bring等で来るため）
+          - 可能な限り object_or_category は削除する
+        """
+        if not isinstance(args, dict):
+            return {}
+
+        # 1) object_or_category -> classified
+        if args.get("object_or_category"):
+            kind, val = self._classify_obj_or_cat(args.get("object_or_category"))
+            if kind == "object":
+                args.setdefault("object", val)
+            elif kind == "category":
+                args.setdefault("object_category", val)
+            # 統一のため削除
+            args.pop("object_or_category", None)
+
+        # 2) object があるがカテゴリだった場合は object_category に移す
+        if args.get("object") and not args.get("object_category"):
+            kind, val = self._classify_obj_or_cat(args.get("object"))
+            if kind == "category":
+                args["object_category"] = val
+                args.pop("object", None)
+
+        # 3) object_category があれば整形
+        if args.get("object_category"):
+            args["object_category"] = _normalize_ws(str(args["object_category"]))
+
+        # 4) object があれば整形
+        if args.get("object"):
+            args["object"] = _normalize_ws(str(args["object"]))
+
+        return args
+
+    # ---------- reference resolver (it/them) ----------
+    def _apply_reference_resolution_and_unify(self, steps: list) -> dict:
+        """
+        - it/them 参照解決で欠けている object/object_category を補完
+        - その後、args を object/object_category に統一（object_or_category は基本消す）
         """
         state = {"object": None, "object_category": None}
 
-        def update_state_from_value(val: str):
-            kind, v = self._classify_obj_or_cat(val)
-            if not v:
-                return
-            if kind == "object":
-                state["object"] = v
+        def update_state_from_args(a: dict):
+            # まず正規化してから state 更新
+            a = self._canonicalize_object_fields(a)
+
+            if a.get("object"):
+                state["object"] = a["object"]
+                # object が確定したらカテゴリは不明扱い（必要なら残してもOK）
                 state["object_category"] = None
-            else:
-                state["object_category"] = v
-                # カテゴリ指定のあとでも object を消さない方が便利な場合もあるが、
-                # ここでは ambiguity を避けるため object は維持しない
-                state["object"] = state["object"]
+            elif a.get("object_category"):
+                state["object_category"] = a["object_category"]
+            return a
 
         for st in steps:
             action = st.get("action")
             args = st.get("args", {}) or {}
 
-            # 1) 明示 object/category が出たら state 更新
-            if "object" in args and args["object"]:
-                update_state_from_value(args["object"])
-            if "object_or_category" in args and args["object_or_category"]:
-                update_state_from_value(args["object_or_category"])
-                # object_or_category をより具体スロットに落とす（後段が楽）
-                kind, v = self._classify_obj_or_cat(args["object_or_category"])
-                if kind == "object":
-                    args.setdefault("object", v)
-                else:
-                    args.setdefault("object_category", v)
+            # まず既存情報で state 更新（+統一）
+            args = update_state_from_args(args)
 
-            if "object_category" in args and args["object_category"]:
-                # 念のため
-                state["object_category"] = _normalize_ws(str(args["object_category"]))
-            if "object_name" in args and args["object_name"]:
-                state["object"] = _normalize_ws(str(args["object_name"]))
+            # 参照解決：必要なアクションで補完
+            def fill_if_missing():
+                # すでに args に object/object_category があれば何もしない
+                if args.get("object") or args.get("object_category"):
+                    return
+                if state["object"]:
+                    args["object"] = state["object"]
+                elif state["object_category"]:
+                    args["object_category"] = state["object_category"]
 
-            # 2) 参照解決が必要なアクションで補完
-            # take_object: "get it" のとき argsが空
-            if action == "take_object":
-                if "object" not in args and "object_or_category" not in args and "object_category" not in args:
-                    if state["object"]:
-                        args["object"] = state["object"]
-                    elif state["object_category"]:
-                        args["object_or_category"] = state["object_category"]
+            if action in ("take_object", "place_object_on_place", "bring_object_to_operator", "deliver_object_to_person_in_room"):
+                fill_if_missing()
 
-            # place_object_on_place: "put it on the refrigerator"
-            if action == "place_object_on_place":
-                if "object" not in args and "object_or_category" not in args and "object_category" not in args:
-                    if state["object"]:
-                        args["object"] = state["object"]
-                    elif state["object_category"]:
-                        args["object_or_category"] = state["object_category"]
+            # 補完後、再度統一（例えば bring に object_category が入ったなど）
+            args = update_state_from_args(args)
 
-            # bring_object_to_operator: "bring it to me" 系（今後拡張用）
-            if action == "bring_object_to_operator":
-                if "object" not in args and "object_category" not in args and "object_or_category" not in args:
-                    if state["object"]:
-                        args["object"] = state["object"]
-                    elif state["object_category"]:
-                        args["object"] = state["object_category"]  # bringは objectキーで受ける実装が多い
-
-            # deliver_object_to_person_in_room 等（必要になったら拡張）
-            if action == "deliver_object_to_person_in_room":
-                if "object" not in args and "object_category" not in args and "object_or_category" not in args:
-                    if state["object"]:
-                        args["object"] = state["object"]
-                    elif state["object_category"]:
-                        args["object_or_category"] = state["object_category"]
-
-            # st に戻す（参照で書き換えているので明示的には不要だが念のため）
             st["args"] = args
 
         return state
@@ -507,8 +509,8 @@ class GpsrParserNode:
                 continue
             norm_steps.append({"action": action, "args": dict(args)})
 
-        # ★参照解決（ここで steps の args が補完される）
-        state = self._apply_reference_resolution(norm_steps)
+        # ★参照解決 + args統一（ここで object_or_category は基本消える）
+        state = self._apply_reference_resolution_and_unify(norm_steps)
 
         payload["steps"] = norm_steps
 
@@ -523,10 +525,9 @@ class GpsrParserNode:
         if not payload["intent_type"]:
             payload["intent_type"] = "other"
 
-        # slots補完（object/category 振り分け + 参照解決 state の最終反映）
         self._fill_slots_from_steps(payload)
 
-        # まだ埋まっていなければ state を最後に反映
+        # まだ埋まっていなければ state を反映
         if payload["slots"].get("object") is None and state.get("object"):
             payload["slots"]["object"] = state["object"]
         if payload["slots"].get("object_category") is None and state.get("object_category"):
@@ -558,45 +559,32 @@ class GpsrParserNode:
             action = st["action"]
             args = st.get("args", {}) or {}
 
-            if action == "bring_object_to_operator":
-                obj = args.get("object")
-                if obj:
-                    kind, val = self._classify_obj_or_cat(obj)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
-                set_if_empty("source_place", args.get("source_place") or args.get("place"))
-
             if action == "find_object_in_room":
                 set_if_empty("source_room", args.get("room"))
-                oc = args.get("object_or_category") or args.get("object") or args.get("object_category")
-                if oc:
-                    kind, val = self._classify_obj_or_cat(oc)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
 
             if action == "take_object":
-                # 参照解決で args に object/object_or_category が入る可能性がある
-                oc = args.get("object") or args.get("object_or_category") or args.get("object_category")
-                if oc and slots.get("object") is None and slots.get("object_category") is None:
-                    kind, val = self._classify_obj_or_cat(oc)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
 
             if action == "place_object_on_place":
                 set_if_empty("destination_place", args.get("place"))
-                oc = args.get("object") or args.get("object_or_category") or args.get("object_category")
-                if oc and slots.get("object") is None and slots.get("object_category") is None:
-                    kind, val = self._classify_obj_or_cat(oc)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
+
+            if action == "bring_object_to_operator":
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
+                set_if_empty("source_place", args.get("source_place") or args.get("place"))
 
             if action == "count_persons_in_room":
                 set_if_empty("source_room", args.get("room"))
