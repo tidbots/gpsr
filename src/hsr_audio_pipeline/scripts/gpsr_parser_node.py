@@ -11,7 +11,6 @@ import re
 import rospy
 from std_msgs.msg import String, Bool, Float32
 
-# ---- PATH FIX (rosrun wrapper/exec 対策) ----
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
@@ -35,10 +34,6 @@ def _normalize_ws(s: str) -> str:
 
 
 def _collapse_duplicated_sentence(text: str) -> str:
-    """
-    ASRが同一文を2回繰り返すケースを1回に畳む。
-    例: "X. X." -> "X."
-    """
     t = _normalize_ws(text)
     if not t:
         return t
@@ -50,15 +45,9 @@ def _collapse_duplicated_sentence(text: str) -> str:
 
 
 def _place_to_name(x):
-    """YAML由来の dict や Parser由来の dict/obj を 'name' 文字列に正規化."""
     if x is None:
         return None
     if isinstance(x, str):
-        s = x.strip()
-        if s.startswith("{") and "name" in s:
-            m = re.search(r"'name'\s*:\s*'([^']+)'", s)
-            if m:
-                return m.group(1)
         return _normalize_ws(x) or None
     if isinstance(x, dict):
         if "name" in x:
@@ -73,7 +62,6 @@ def _place_to_name(x):
 
 
 def _safe_to_dict(obj):
-    """GpsrCommand / dataclass / dict / json(str) を dict に寄せる."""
     if obj is None:
         return {}
     if isinstance(obj, dict):
@@ -104,32 +92,17 @@ def _safe_read(path: str) -> str:
 
 
 def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects_md: str, test_objects_md: str = ""):
-    """
-    /data/vocab/*.md から語彙を生成（generator系の表形式を想定）
-      - names.md
-      - room_names.md
-      - location_names.md (末尾 (p) は placement)
-      - objects.md (# Class plural singular ... / table)
-      - test_objects.md (任意)
-    返り値は parser_node が期待する辞書形式：
-      person_names, room_names, location_names, placement_location_names,
-      object_names, object_categories_plural, object_categories_singular
-    """
-    # names
     names = re.findall(r"\|\s*([A-Za-z]+)\s*\|", _safe_read(names_md))
     names = [x.strip() for x in names][1:] if names else []
 
-    # rooms
     rooms = re.findall(r"\|\s*(\w+ \w*)\s*\|", _safe_read(rooms_md))
     rooms = [x.strip() for x in rooms][1:] if rooms else []
 
-    # locations (+ placement)
     loc_pairs = re.findall(r"\|\s*([0-9]+)\s*\|\s*([A-Za-z,\s\(\)]+)\|", _safe_read(locations_md))
     locs = [b.strip() for (_, b) in loc_pairs]
     placement = [x.replace("(p)", "").strip() for x in locs if x.strip().endswith("(p)")]
     locs = [x.replace("(p)", "").strip() for x in locs]
 
-    # objects + categories
     md_obj = _safe_read(objects_md)
     obj_names = re.findall(r"\|\s*(\w+)\s*\|", md_obj)
     obj_names = [o for o in obj_names if o != "Objectname"]
@@ -144,7 +117,6 @@ def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects
             cat_plur.append(parts[0].replace("_", " "))
             cat_sing.append(parts[1].replace("_", " "))
 
-    # test_objects (任意)
     if test_objects_md and os.path.exists(test_objects_md):
         md_test = _safe_read(test_objects_md)
         test_objs = re.findall(r"\|\s*(\w+)\s*\|", md_test)
@@ -183,19 +155,11 @@ class GpsrParserNode:
 
     ACTION_HINTS = {
         "bring_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
-        "deliver_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
-        "take_object_from_place": ("bring", "takeObjFromPlcmt"),
         "deliver_object_to_person_in_room": ("bring", "deliverObjToPrsInRoom"),
         "answer_to_person_in_room": ("answer", "answerToPrsInRoom"),
         "talk_to_person_in_room": ("answer", "talkInfoToGestPrsInRoom"),
         "count_persons_in_room": ("answer", "countPrsInRoom"),
-        "tell_object_property_on_place": ("answer", "tellObjPropOnPlcmt"),
-        "tell_category_property_on_place": ("answer", "tellCatPropOnPlcmt"),
-        "tell_person_info": ("answer", "tellPersonInfoInRoom"),
-        "tell_person_info_from_loc_to_loc": ("answer", "tellPersonInfoFromLocToLoc"),
         "guide_named_person_from_place_to_place": ("guide", "guideNameFromBeacToBeac"),
-        "guide_person_to_dest": ("guide", "guidePersonToDest"),
-        "greet_person_with_clothes_in_room": ("composite", "greetClothDscInRm"),
         "place_object_on_place": ("composite", "placeObjOnPlcmt"),
         "take_object": ("composite", "takeObj"),
         "find_object_in_room": ("composite", "findObjInRoom"),
@@ -208,14 +172,11 @@ class GpsrParserNode:
         self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
         self.conf_topic = rospy.get_param("~confidence_topic", "/gpsr/asr/confidence")
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
-
         self.lang = rospy.get_param("~lang", "en")
 
-        # --- vocab paths ---
         self.vocab_dir = rospy.get_param("~vocab_dir", "/data/vocab")
         self.vocab_yaml = rospy.get_param("~vocab_yaml", os.path.join(self.vocab_dir, "vocab.yaml"))
 
-        # MD vocab (preferred if all exist)
         self.names_md = rospy.get_param("~names_md", os.path.join(self.vocab_dir, "names.md"))
         self.rooms_md = rospy.get_param("~rooms_md", os.path.join(self.vocab_dir, "room_names.md"))
         self.locations_md = rospy.get_param("~locations_md", os.path.join(self.vocab_dir, "location_names.md"))
@@ -237,7 +198,6 @@ class GpsrParserNode:
         self._last_pub_wall = 0.0
         self._pub_lock = threading.Lock()
 
-        # ---- load vocab (MD preferred; YAML fallback) ----
         use_md = all([
             self.names_md and os.path.exists(self.names_md),
             self.rooms_md and os.path.exists(self.rooms_md),
@@ -264,12 +224,11 @@ class GpsrParserNode:
             vocab = self._load_vocab_yaml(self.vocab_yaml)
             rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
 
-        # --- local sets for slot classification ---
-        # normalize to lowercase for robust compare
+        # lowercase sets for classification
         self._obj_set = set([s.strip().lower() for s in vocab["object_names"] if isinstance(s, str)])
         self._cat_set = set([s.strip().lower() for s in (vocab["object_categories_singular"] + vocab["object_categories_plural"]) if isinstance(s, str)])
 
-        # 重要：複合語優先（desk lamp が desk より先にマッチ）
+        # prefer longer tokens
         vocab["location_names"] = sorted(vocab["location_names"], key=lambda s: (-len(s), s.lower()))
         vocab["placement_location_names"] = sorted(vocab["placement_location_names"], key=lambda s: (-len(s), s.lower()))
         vocab["object_names"] = sorted(vocab["object_names"], key=lambda s: (-len(s), s.lower()))
@@ -349,15 +308,14 @@ class GpsrParserNode:
                 object_categories_singular=sorted(set([x for x in cats_s if x])),
             )
 
-        # fallback minimal
         return dict(
-            person_names=["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"],
-            room_names=["bedroom", "kitchen", "living room", "office", "bathroom"],
-            location_names=["desk lamp", "desk", "storage rack", "sofa", "sink", "refrigerator"],
-            placement_location_names=["desk lamp", "desk", "storage rack", "sofa", "sink", "refrigerator"],
-            object_names=["red wine", "mustard", "chocolate jello"],
-            object_categories_plural=["drinks", "foods", "cleaning supplies"],
-            object_categories_singular=["drink", "food", "cleaning supply"],
+            person_names=[],
+            room_names=[],
+            location_names=[],
+            placement_location_names=[],
+            object_names=[],
+            object_categories_plural=[],
+            object_categories_singular=[],
         )
 
     def _on_text(self, msg: String):
@@ -414,6 +372,109 @@ class GpsrParserNode:
         payload = self._coerce_to_v1(parsed_obj, raw)
         self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
+    # ---------- object/category classifier ----------
+    def _classify_obj_or_cat(self, s: str):
+        if not s:
+            return None, None
+        v = _normalize_ws(str(s)).lower()
+        if not v:
+            return None, None
+
+        if v in self._obj_set:
+            return "object", _normalize_ws(str(s))
+        if v in self._cat_set:
+            return "category", _normalize_ws(str(s))
+
+        if v.endswith("s") and v[:-1] in self._cat_set:
+            return "category", _normalize_ws(str(s))
+        if (v + "s") in self._cat_set:
+            return "category", _normalize_ws(str(s))
+
+        return "category", _normalize_ws(str(s))
+
+    # ---------- NEW: reference resolver ----------
+    def _apply_reference_resolution(self, steps: list) -> dict:
+        """
+        it/them 参照解決：
+        - 直前に確定した object / object_category を state として保持
+        - take/place/bring/deliver 等で省略されていたら補完
+        返り値: state {"object": str|None, "object_category": str|None}
+        """
+        state = {"object": None, "object_category": None}
+
+        def update_state_from_value(val: str):
+            kind, v = self._classify_obj_or_cat(val)
+            if not v:
+                return
+            if kind == "object":
+                state["object"] = v
+                state["object_category"] = None
+            else:
+                state["object_category"] = v
+                # カテゴリ指定のあとでも object を消さない方が便利な場合もあるが、
+                # ここでは ambiguity を避けるため object は維持しない
+                state["object"] = state["object"]
+
+        for st in steps:
+            action = st.get("action")
+            args = st.get("args", {}) or {}
+
+            # 1) 明示 object/category が出たら state 更新
+            if "object" in args and args["object"]:
+                update_state_from_value(args["object"])
+            if "object_or_category" in args and args["object_or_category"]:
+                update_state_from_value(args["object_or_category"])
+                # object_or_category をより具体スロットに落とす（後段が楽）
+                kind, v = self._classify_obj_or_cat(args["object_or_category"])
+                if kind == "object":
+                    args.setdefault("object", v)
+                else:
+                    args.setdefault("object_category", v)
+
+            if "object_category" in args and args["object_category"]:
+                # 念のため
+                state["object_category"] = _normalize_ws(str(args["object_category"]))
+            if "object_name" in args and args["object_name"]:
+                state["object"] = _normalize_ws(str(args["object_name"]))
+
+            # 2) 参照解決が必要なアクションで補完
+            # take_object: "get it" のとき argsが空
+            if action == "take_object":
+                if "object" not in args and "object_or_category" not in args and "object_category" not in args:
+                    if state["object"]:
+                        args["object"] = state["object"]
+                    elif state["object_category"]:
+                        args["object_or_category"] = state["object_category"]
+
+            # place_object_on_place: "put it on the refrigerator"
+            if action == "place_object_on_place":
+                if "object" not in args and "object_or_category" not in args and "object_category" not in args:
+                    if state["object"]:
+                        args["object"] = state["object"]
+                    elif state["object_category"]:
+                        args["object_or_category"] = state["object_category"]
+
+            # bring_object_to_operator: "bring it to me" 系（今後拡張用）
+            if action == "bring_object_to_operator":
+                if "object" not in args and "object_category" not in args and "object_or_category" not in args:
+                    if state["object"]:
+                        args["object"] = state["object"]
+                    elif state["object_category"]:
+                        args["object"] = state["object_category"]  # bringは objectキーで受ける実装が多い
+
+            # deliver_object_to_person_in_room 等（必要になったら拡張）
+            if action == "deliver_object_to_person_in_room":
+                if "object" not in args and "object_category" not in args and "object_or_category" not in args:
+                    if state["object"]:
+                        args["object"] = state["object"]
+                    elif state["object_category"]:
+                        args["object_or_category"] = state["object_category"]
+
+            # st に戻す（参照で書き換えているので明示的には不要だが念のため）
+            st["args"] = args
+
+        return state
+
     def _coerce_to_v1(self, parsed_obj, raw_text: str):
         parsed = _safe_to_dict(parsed_obj)
 
@@ -446,9 +507,11 @@ class GpsrParserNode:
                 continue
             norm_steps.append({"action": action, "args": dict(args)})
 
+        # ★参照解決（ここで steps の args が補完される）
+        state = self._apply_reference_resolution(norm_steps)
+
         payload["steps"] = norm_steps
 
-        # action から intent_type / command_kind を補完
         if payload["steps"]:
             a0 = payload["steps"][0]["action"]
             hint = self.ACTION_HINTS.get(a0)
@@ -460,49 +523,26 @@ class GpsrParserNode:
         if not payload["intent_type"]:
             payload["intent_type"] = "other"
 
-        # slots補完（ここが今回の本丸：object/category 振り分け）
+        # slots補完（object/category 振り分け + 参照解決 state の最終反映）
         self._fill_slots_from_steps(payload)
 
-        # place文字列化（dict混入対策）
+        # まだ埋まっていなければ state を最後に反映
+        if payload["slots"].get("object") is None and state.get("object"):
+            payload["slots"]["object"] = state["object"]
+        if payload["slots"].get("object_category") is None and state.get("object_category"):
+            payload["slots"]["object_category"] = state["object_category"]
+
+        # place文字列化
         for k in ["source_place", "destination_place"]:
             payload["slots"][k] = _place_to_name(payload["slots"].get(k))
 
-        # steps 内の place/from/to の dict も正規化
         for st in payload["steps"]:
             a = st.get("args", {})
-            for key in ["place", "from_place", "to_place", "location", "source_location", "target_location", "source_place", "destination_place"]:
+            for key in ["place", "from_place", "to_place", "location", "source_place", "destination_place"]:
                 if key in a:
                     a[key] = _place_to_name(a.get(key))
 
         return payload
-
-    # ---------- NEW: object/category classifier ----------
-    def _classify_obj_or_cat(self, s: str):
-        """
-        object_or_category を object / category に振り分ける。
-        - object_names に一致 → ("object", value)
-        - category（sing/plur）に一致 → ("category", value)
-        - どちらにも一致しない → ("category", value) へ寄せる（GPSRの安全側）
-        """
-        if not s:
-            return None, None
-        v = _normalize_ws(str(s)).lower()
-        if not v:
-            return None, None
-
-        if v in self._obj_set:
-            return "object", _normalize_ws(str(s))
-        if v in self._cat_set:
-            return "category", _normalize_ws(str(s))
-
-        # 形が近い場合（単数/複数の s 付与など）
-        if v.endswith("s") and v[:-1] in self._cat_set:
-            return "category", _normalize_ws(str(s))
-        if (v + "s") in self._cat_set:
-            return "category", _normalize_ws(str(s))
-
-        # fallback: categoryへ
-        return "category", _normalize_ws(str(s))
 
     def _fill_slots_from_steps(self, payload: dict):
         slots = payload["slots"]
@@ -516,9 +556,8 @@ class GpsrParserNode:
 
         for st in steps:
             action = st["action"]
-            args = st.get("args", {})
+            args = st.get("args", {}) or {}
 
-            # bring_object_to_operator
             if action == "bring_object_to_operator":
                 obj = args.get("object")
                 if obj:
@@ -529,99 +568,46 @@ class GpsrParserNode:
                         set_if_empty("object_category", val)
                 set_if_empty("source_place", args.get("source_place") or args.get("place"))
 
-            # take_object_from_place（カテゴリ指定が多い）
-            if action == "take_object_from_place":
-                oc = args.get("object_or_category")
+            if action == "find_object_in_room":
+                set_if_empty("source_room", args.get("room"))
+                oc = args.get("object_or_category") or args.get("object") or args.get("object_category")
                 if oc:
                     kind, val = self._classify_obj_or_cat(oc)
                     if kind == "object":
                         set_if_empty("object", val)
                     else:
                         set_if_empty("object_category", val)
-                set_if_empty("source_place", args.get("place"))
 
-            # deliver_object_to_person_in_room
-            if action == "deliver_object_to_person_in_room":
-                set_if_empty("person", args.get("person_filter"))
-                set_if_empty("destination_room", args.get("room"))
+            if action == "take_object":
+                # 参照解決で args に object/object_or_category が入る可能性がある
+                oc = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if oc and slots.get("object") is None and slots.get("object_category") is None:
+                    kind, val = self._classify_obj_or_cat(oc)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
 
-            # answer/talk
-            if action in ("answer_to_person_in_room", "talk_to_person_in_room"):
-                set_if_empty("destination_room", args.get("room"))
-                if "person_filter" in args:
-                    set_if_empty("attribute", args.get("person_filter"))
+            if action == "place_object_on_place":
+                set_if_empty("destination_place", args.get("place"))
+                oc = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if oc and slots.get("object") is None and slots.get("object_category") is None:
+                    kind, val = self._classify_obj_or_cat(oc)
+                    if kind == "object":
+                        set_if_empty("object", val)
+                    else:
+                        set_if_empty("object_category", val)
 
-            # count_persons_in_room
             if action == "count_persons_in_room":
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural"))
 
-            # find_object_in_room（ここが重要：object_or_category を分類）
-            if action == "find_object_in_room":
-                set_if_empty("source_room", args.get("room"))
-                oc = args.get("object_or_category")
-                if oc:
-                    kind, val = self._classify_obj_or_cat(oc)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
-
-            # greet_person_with_clothes_in_room
-            if action == "greet_person_with_clothes_in_room":
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("attribute", args.get("clothes_description"))
-
-            # place_object_on_place
-            if action == "place_object_on_place":
-                set_if_empty("destination_place", args.get("place"))
-                # もし placeステップに object が付く場合にも対応
-                obj = args.get("object")
-                if obj and slots.get("object") is None and slots.get("object_category") is None:
-                    kind, val = self._classify_obj_or_cat(obj)
-                    if kind == "object":
-                        set_if_empty("object", val)
-                    else:
-                        set_if_empty("object_category", val)
-
-            # follow_person_to_dest
-            if action == "follow_person_to_dest":
-                set_if_empty("destination_place", args.get("location"))
+            if action == "answer_to_person_in_room":
+                set_if_empty("destination_room", args.get("room"))
                 if args.get("person_filter"):
-                    set_if_empty("person", args.get("person_filter"))
                     set_if_empty("attribute", args.get("person_filter"))
 
-            # go_to_location
-            if action == "go_to_location":
-                set_if_empty("source_room", args.get("room"))
-
-            # tell_category_property_on_place
-            if action == "tell_category_property_on_place":
-                set_if_empty("question_type", "category_property")
-                set_if_empty("comparison", args.get("comparison"))
-                oc = args.get("object_category")
-                if oc:
-                    # ここはカテゴリとして扱う
-                    set_if_empty("object_category", _normalize_ws(str(oc)))
-                set_if_empty("source_place", args.get("place"))
-
-            # tell_person_info
-            if action == "tell_person_info":
-                set_if_empty("question_type", "person_info")
-                set_if_empty("attribute", args.get("person_info"))
-                set_if_empty("source_room", args.get("room"))
-                if args.get("location"):
-                    set_if_empty("source_place", args.get("location"))
-
-            # tell_person_info_from_loc_to_loc
-            if action == "tell_person_info_from_loc_to_loc":
-                set_if_empty("question_type", "person_info")
-                set_if_empty("attribute", args.get("person_info"))
-                set_if_empty("person_at_source", args.get("source_location"))
-                set_if_empty("person_at_destination", args.get("target_location"))
-
-            # guide_named_person_from_place_to_place
             if action == "guide_named_person_from_place_to_place":
                 set_if_empty("person", args.get("name"))
                 set_if_empty("source_place", args.get("from_place"))
