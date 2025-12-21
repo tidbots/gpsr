@@ -97,141 +97,133 @@ def _ensure_writable_dir(preferred: str, fallback: str, label: str) -> str:
         rospy.logwarn("%s dir fallback -> %s", label, fallback)
         return fallback
 
-    # last resort: current working dir subfolder
-    last = os.path.join(os.getcwd(), f".{label}")
-    try:
-        os.makedirs(last, exist_ok=True)
-        rospy.logwarn("%s dir last resort -> %s", label, last)
-        return last
-    except Exception:
-        # absolutely last: /tmp
-        last2 = os.path.join("/tmp", f"{label}")
-        os.makedirs(last2, exist_ok=True)
-        rospy.logwarn("%s dir last resort -> %s", label, last2)
-        return last2
+    # last resort: current directory
+    rospy.logwarn("%s dir fallback -> (.)", label)
+    return "."
 
 
 def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
     """
-    Returns:
-      words: list[str]  (for hotwords)
-      corrections: dict[str, str] (lowercase mapping for post-correction)
+    vocab.yaml 想定:
+      objects: [...]
+      categories: [...]
+      names: [...]
+      locations:
+        rooms: [...]
+        placements: [...]
+      corrections:
+        - from: "foot"
+          to: "food"
+    などを柔軟に拾う
     """
     with open(path, "r", encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
 
     words: List[str] = []
-    corrections: Dict[str, str] = {}
 
-    # names
-    for n in y.get("names", []) or []:
-        if isinstance(n, str) and n.strip():
-            words.append(n.strip())
+    def add_list(key: str):
+        v = y.get(key)
+        if isinstance(v, list):
+            for s in v:
+                if isinstance(s, str) and s.strip():
+                    words.append(s.strip())
 
-    # rooms
-    for r in y.get("rooms", []) or []:
-        if isinstance(r, str) and r.strip():
-            words.append(r.strip())
-            rr = r.strip()
-            if " " in rr:
-                corrections[_lower(rr.replace(" ", ""))] = _lower(rr)
+    add_list("objects")
+    add_list("categories")
+    add_list("names")
 
-    # locations
-    for loc in y.get("locations", []) or []:
-        if not isinstance(loc, dict) or "name" not in loc:
-            continue
-        name = str(loc["name"]).strip()
-        if not name:
-            continue
-        words.append(name)
-        if " " in name:
-            corrections[_lower(name.replace(" ", ""))] = _lower(name)
-        if "-" in name:
-            corrections[_lower(name.replace("-", " "))] = _lower(name.replace("-", " "))
-            corrections[_lower(name.replace("-", ""))] = _lower(name.replace("-", " "))
+    loc = y.get("locations", {})
+    if isinstance(loc, dict):
+        rooms = loc.get("rooms")
+        if isinstance(rooms, list):
+            for s in rooms:
+                if isinstance(s, str) and s.strip():
+                    words.append(s.strip())
+        pls = loc.get("placements")
+        if isinstance(pls, list):
+            for p in pls:
+                if isinstance(p, dict):
+                    n = p.get("name")
+                    if isinstance(n, str) and n.strip():
+                        words.append(n.strip())
+                elif isinstance(p, str) and p.strip():
+                    words.append(p.strip())
 
-    # categories + objects
-    for c in y.get("categories", []) or []:
-        if not isinstance(c, dict):
-            continue
-        singular = str(c.get("singular", "")).strip()
-        plural = str(c.get("plural", "")).strip()
-        if singular:
-            words.append(singular)
-        if plural:
-            words.append(plural)
+    # optional flat "placements"
+    pls2 = y.get("placements")
+    if isinstance(pls2, list):
+        for p in pls2:
+            if isinstance(p, dict):
+                n = p.get("name")
+                if isinstance(n, str) and n.strip():
+                    words.append(n.strip())
+            elif isinstance(p, str) and p.strip():
+                words.append(p.strip())
 
-        if singular:
-            corrections[_lower(singular)] = _lower(singular)
-        if plural:
-            corrections[_lower(plural)] = _lower(plural)
-
-        for o in c.get("objects", []) or []:
-            if not isinstance(o, str):
+    # corrections: list[{from,to}] or dict
+    corr_map: Dict[str, str] = {}
+    corr = y.get("corrections")
+    if isinstance(corr, dict):
+        for k, v in corr.items():
+            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+                corr_map[_lower(k)] = _lower(v)
+    elif isinstance(corr, list):
+        for it in corr:
+            if not isinstance(it, dict):
                 continue
-            obj = o.replace("_", " ").strip()
-            if not obj:
-                continue
-            words.append(obj)
-            corrections[_lower(o)] = _lower(obj)
-            if " " in obj:
-                corrections[_lower(obj.replace(" ", ""))] = _lower(obj)
+            f = it.get("from")
+            t = it.get("to")
+            if isinstance(f, str) and isinstance(t, str) and f.strip() and t.strip():
+                corr_map[_lower(f)] = _lower(t)
 
-    # very light canonicalization for common GPSR typos (safe defaults)
-    corrections.setdefault("foot", "food")
-    corrections.setdefault("past room", "bathroom")
-
-    words = [w.strip() for w in words if isinstance(w, str) and w.strip()]
-    words = _unique_keep_order(words)
-    return words, corrections
+    words = _unique_keep_order([w for w in words if w])
+    return words, corr_map
 
 
 def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
-    """
-    Build a hotwords STRING for faster-whisper.
-    - Prefer longer phrases first
-    - Clamp number of terms
-    """
-    tmp = {}
-    for w in words:
-        ww = _normalize_ws(w)
-        if not ww:
+    # faster-whisper の hotwords は “文字列” が安全（内部で .strip() される）
+    # multiword もそのまま通す
+    w = []
+    for s in words:
+        s2 = _normalize_ws(s)
+        if not s2:
             continue
-        tmp.setdefault(ww.lower(), ww)
-    uniq = list(tmp.values())
-    uniq.sort(key=lambda s: (-len(s), s.lower()))
-    if len(uniq) > max_terms:
-        uniq = uniq[:max_terms]
-    return " ".join(uniq)
+        # 句読点など最小限除去（任意）
+        s2 = re.sub(r"[^\w\s\-]", " ", s2).strip()
+        s2 = " ".join(s2.split())
+        if s2:
+            w.append(s2)
+    w = _unique_keep_order(w)
+    if max_terms > 0:
+        w = w[:max_terms]
+    return " ".join(w)
 
 
 class CorrectionEngine:
     """
-    Light post-ASR correction:
-      - phrase substitutions using boundaries
-      - lowercase matching; output is lowercase (parser normalizes anyway)
+    超軽量の置換（例: foot->food, past->pantry など）
+    ここは “強くしすぎると事故る” ので最低限。
     """
-
-    def __init__(self, mapping: Dict[str, str]):
-        self.mapping = {_lower(k): _lower(v) for k, v in (mapping or {}).items() if _lower(k) and _lower(v)}
-        self.keys = sorted(self.mapping.keys(), key=lambda s: -len(s))
-        self.patterns: List[Tuple[re.Pattern, str]] = []
-        for k in self.keys:
-            pat = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
-            self.patterns.append((pat, self.mapping[k]))
+    def __init__(self, corr_map: Dict[str, str]):
+        self.map = corr_map or {}
 
     def apply(self, text: str) -> str:
-        t = _lower(text)
-        if not t:
-            return t
-        for pat, rep in self.patterns:
-            t = pat.sub(rep, t)
-        return _normalize_ws(t)
+        if not text:
+            return ""
+        s = _lower(text)
+        # 単語境界優先で置換
+        for f, t in self.map.items():
+            if not f or not t:
+                continue
+            # multiword は単純に包含で
+            if " " in f:
+                s = s.replace(f, t)
+            else:
+                s = re.sub(rf"\b{re.escape(f)}\b", t, s)
+        s = _normalize_ws(s)
+        return s
 
 
-# ----------------------------
-# Node
-# ----------------------------
 class FasterWhisperASRNode:
     def __init__(self):
         rospy.init_node("faster_whisper_asr_node")
