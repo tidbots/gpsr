@@ -41,7 +41,7 @@ def _collapse_duplicated_sentence(text: str) -> str:
     t = _normalize_ws(text)
     if not t:
         return t
-    # 末尾の句点/ピリオドを正規化
+    # 末尾の句点/ピリオドを正規化https://github.com/tidbots/gpsr/blob/main/src/hsr_audio_pipeline/scripts/gpsr_parser_node.py
     t2 = t.replace("..", ".")
     # "A. A." パターン（完全一致）だけ畳む
     parts = [p.strip() for p in t2.split(".") if p.strip()]
@@ -155,8 +155,7 @@ class GpsrParserNode:
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
 
         self.lang = rospy.get_param("~lang", "en")
-        self.vocab_yaml = rospy.get_param("~vocab_yaml", "")
-
+        self.vocab_yaml = rospy.get_param("~vocab_yaml", "/data/vocab/vocab.yaml")
         self.max_text_age = float(rospy.get_param("~max_text_age_sec", 1.0))
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
