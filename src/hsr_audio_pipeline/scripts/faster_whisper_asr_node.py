@@ -18,7 +18,7 @@ Key features:
   - External VAD drives segmentation
   - pre_roll + post_roll audio
   - Uses faster-whisper WhisperModel
-  - Loads GPSR vocab YAML via ~vocab_yaml (default: /data/vocab/vocab.yaml)
+  - Hotwords from MD vocab (/data/vocab/*.md) preferred; fallback to vocab.yaml
       * builds hotwords STRING (NOT list) -> avoids .strip() crash
   - Loads corrections YAML via ~corrections_yaml (default: /data/vocab/corrections.yaml)
       * merged with vocab.yaml's embedded corrections (corrections_yaml wins)
@@ -29,6 +29,8 @@ Key features:
 
 Notes:
   - To persist across container restarts, mount host dir to /data (compose bind mount).
+  - MD vocab files are expected under /data/vocab/:
+      names.md, room_names.md, location_names.md, objects.md, (optional) test_objects.md
 """
 
 import os
@@ -203,6 +205,71 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
     return words, corr_map
 
 
+def _safe_read(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _words_from_md(
+    names_md: str,
+    rooms_md: str,
+    locations_md: str,
+    objects_md: str,
+    test_objects_md: str = "",
+) -> List[str]:
+    """
+    MD files under /data/vocab/ (robocupathome generator-style tables):
+      names.md
+      room_names.md
+      location_names.md (with (p) suffix for placement locations)
+      objects.md (with # Class plural singular ... sections)
+      test_objects.md (optional; for hotwords only)
+    """
+    # names
+    names = re.findall(r"\|\s*([A-Za-z]+)\s*\|", _safe_read(names_md))
+    names = [x.strip() for x in names][1:] if names else []
+
+    # rooms
+    rooms = re.findall(r"\|\s*(\w+ \w*)\s*\|", _safe_read(rooms_md))
+    rooms = [x.strip() for x in rooms][1:] if rooms else []
+
+    # locations (+ placement)
+    loc_pairs = re.findall(r"\|\s*([0-9]+)\s*\|\s*([A-Za-z,\s\(\)]+)\|", _safe_read(locations_md))
+    locs = [b.strip() for (_, b) in loc_pairs]
+    placement = [x.replace("(p)", "").strip() for x in locs if x.strip().endswith("(p)")]
+    locs = [x.replace("(p)", "").strip() for x in locs]
+
+    # objects + categories
+    md_obj = _safe_read(objects_md)
+    obj_names = re.findall(r"\|\s*(\w+)\s*\|", md_obj)
+    obj_names = [o for o in obj_names if o != "Objectname"]
+    obj_names = [o.replace("_", " ").strip() for o in obj_names if o.strip()]
+
+    cats = re.findall(r"# Class \s*([\w,\s\(\)]+)\s*", md_obj)
+    cats = [c.strip().replace("(", "").replace(")", "") for c in cats]
+    cat_plur, cat_sing = [], []
+    for c in cats:
+        parts = c.split()
+        if len(parts) >= 2:
+            cat_plur.append(parts[0].replace("_", " "))
+            cat_sing.append(parts[1].replace("_", " "))
+
+    # test objects (hotwords増量用：objectsに加える)
+    if test_objects_md and os.path.exists(test_objects_md):
+        md_test = _safe_read(test_objects_md)
+        test_objs = re.findall(r"\|\s*(\w+)\s*\|", md_test)
+        test_objs = [o for o in test_objs if o != "Objectname"]
+        test_objs = [o.replace("_", " ").strip() for o in test_objs if o.strip()]
+        obj_names = list(set(obj_names + test_objs))
+
+    words = list(set(names + rooms + locs + placement + obj_names + cat_plur + cat_sing))
+    words = [w for w in words if isinstance(w, str) and len(w.strip()) >= 2]
+    return words
+
+
 def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
     # faster-whisper の hotwords は “文字列” が安全（内部で .strip() される）
     w = []
@@ -307,6 +374,13 @@ class FasterWhisperASRNode:
         self.vocab_yaml = rospy.get_param("~vocab_yaml", os.path.join(self.vocab_dir, "vocab.yaml"))
         self.corrections_yaml = rospy.get_param("~corrections_yaml", os.path.join(self.vocab_dir, "corrections.yaml"))
 
+        # ---- MD vocab paths (preferred for hotwords) ----
+        self.names_md = rospy.get_param("~names_md", os.path.join(self.vocab_dir, "names.md"))
+        self.rooms_md = rospy.get_param("~rooms_md", os.path.join(self.vocab_dir, "room_names.md"))
+        self.locations_md = rospy.get_param("~locations_md", os.path.join(self.vocab_dir, "location_names.md"))
+        self.objects_md = rospy.get_param("~objects_md", os.path.join(self.vocab_dir, "objects.md"))
+        self.test_objects_md = rospy.get_param("~test_objects_md", os.path.join(self.vocab_dir, "test_objects.md"))
+
         # ---- prompts / hotwords ----
         self.use_hotwords = bool(rospy.get_param("~use_hotwords", True))
         self.max_hotwords_terms = int(rospy.get_param("~max_hotwords_terms", 250))
@@ -323,31 +397,60 @@ class FasterWhisperASRNode:
         self.hotwords_str = ""
         merged_corr: Dict[str, str] = {}
 
-        # 1) load vocab.yaml (words + embedded corrections)
+        # 1) load MD vocab for hotwords (preferred)
         vocab_words: List[str] = []
-        vocab_corr: Dict[str, str] = {}
-        if self.vocab_yaml and os.path.exists(self.vocab_yaml):
+        use_md = all([
+            self.names_md and os.path.exists(self.names_md),
+            self.rooms_md and os.path.exists(self.rooms_md),
+            self.locations_md and os.path.exists(self.locations_md),
+            self.objects_md and os.path.exists(self.objects_md),
+        ])
+
+        if use_md:
             try:
-                vocab_words, vocab_corr = _words_from_vocab_yaml(self.vocab_yaml)
+                vocab_words = _words_from_md(
+                    self.names_md,
+                    self.rooms_md,
+                    self.locations_md,
+                    self.objects_md,
+                    self.test_objects_md,
+                )
                 if self.use_hotwords:
                     self.hotwords_str = _build_hotwords_string(vocab_words, max_terms=self.max_hotwords_terms)
-                merged_corr.update(vocab_corr)
                 rospy.loginfo(
-                    "Loaded vocab_yaml: %s (hotwords_terms=%d)",
-                    self.vocab_yaml, len(self.hotwords_str.split())
+                    "Loaded MD vocab for hotwords: dir=%s (hotwords_terms=%d)",
+                    self.vocab_dir, len(self.hotwords_str.split())
                 )
             except Exception as e:
-                rospy.logwarn("Failed to load vocab_yaml=%s: %s", self.vocab_yaml, e)
-        else:
-            rospy.logwarn("vocab_yaml not found: %s", self.vocab_yaml)
+                rospy.logwarn("Failed to load MD vocab (fallback to YAML): %s", e)
+                use_md = False
 
-        # 2) load corrections.yaml (overrides vocab corrections)
+        # 2) load vocab.yaml (fallback for hotwords + embedded corrections)
+        vocab_corr: Dict[str, str] = {}
+        if not use_md:
+            if self.vocab_yaml and os.path.exists(self.vocab_yaml):
+                try:
+                    vocab_words, vocab_corr = _words_from_vocab_yaml(self.vocab_yaml)
+                    if self.use_hotwords:
+                        self.hotwords_str = _build_hotwords_string(vocab_words, max_terms=self.max_hotwords_terms)
+                    rospy.loginfo(
+                        "Loaded vocab_yaml: %s (hotwords_terms=%d)",
+                        self.vocab_yaml, len(self.hotwords_str.split())
+                    )
+                except Exception as e:
+                    rospy.logwarn("Failed to load vocab_yaml=%s: %s", self.vocab_yaml, e)
+            else:
+                rospy.logwarn("vocab_yaml not found: %s", self.vocab_yaml)
+
+        # embedded corrections (optional) from vocab.yaml (fallback)
+        merged_corr.update(vocab_corr)
+
+        # 3) load corrections.yaml (overrides vocab corrections)
         if self.corrections_yaml and os.path.exists(self.corrections_yaml):
             try:
                 with open(self.corrections_yaml, "r", encoding="utf-8") as f:
                     cy = yaml.safe_load(f) or {}
                 cy_map = _load_corrections_any(cy)
-                # override
                 merged_corr.update(cy_map)
                 rospy.loginfo("Loaded corrections_yaml: %s (rules=%d)", self.corrections_yaml, len(cy_map))
             except Exception as e:
@@ -383,166 +486,4 @@ class FasterWhisperASRNode:
         # ---- ROS pub/sub ----
         self.pub_raw = rospy.Publisher(self.raw_text_topic, String, queue_size=10)
         self.pub_text = rospy.Publisher(self.text_topic, String, queue_size=10)
-        self.pub_utt_end = rospy.Publisher(self.utt_end_topic, Bool, queue_size=10)
-
-        self.pub_conf = None
-        if self.publish_confidence:
-            self.pub_conf = rospy.Publisher(self.conf_topic, Float32, queue_size=10)
-
-        rospy.Subscriber(self.audio_topic, AudioData, self._on_audio, queue_size=200)
-        rospy.Subscriber(self.vad_topic, Bool, self._on_vad, queue_size=50)
-
-        # ---- audio buffers ----
-        self._lock = threading.Lock()
-        self._ring = deque()  # list of (t, bytes)
-        self._ring_max_sec = max(3.0, self.pre_roll + self.max_segment_sec + self.post_roll + 1.0)
-
-        self._in_speech = False
-        self._seg_bytes = bytearray()
-        self._seg_start_time = None
-
-        self._pending_finalize = False
-        self._finalize_at = 0.0  # wall time
-
-        self._timer = rospy.Timer(rospy.Duration(0.05), self._timer_cb)
-
-        rospy.loginfo(
-            "FasterWhisperASRNode started. audio=%s vad=%s -> raw=%s text=%s end=%s",
-            self.audio_topic, self.vad_topic, self.raw_text_topic, self.text_topic, self.utt_end_topic
-        )
-
-    # ---------------- audio callbacks ----------------
-    def _on_audio(self, msg: AudioData):
-        b = bytes(msg.data)
-        now = time.time()
-        with self._lock:
-            self._ring.append((now, b))
-            cutoff = now - self._ring_max_sec
-            while self._ring and self._ring[0][0] < cutoff:
-                self._ring.popleft()
-
-            if self._in_speech:
-                self._seg_bytes.extend(b)
-                if self._seg_start_time is not None and (now - self._seg_start_time) > self.max_segment_sec:
-                    rospy.logwarn("ASR: max_segment_sec reached -> force finalize")
-                    self._schedule_finalize(post_roll=self.post_roll)
-
-    def _on_vad(self, msg: Bool):
-        is_speech = bool(msg.data)
-        now = time.time()
-
-        with self._lock:
-            if is_speech and not self._in_speech:
-                self._in_speech = True
-                self._pending_finalize = False
-                self._seg_bytes = bytearray()
-                self._seg_start_time = now
-
-                preroll_cut = now - self.pre_roll
-                for t, b in self._ring:
-                    if t >= preroll_cut:
-                        self._seg_bytes.extend(b)
-
-                rospy.loginfo("ASR: VAD ON -> start segment (pre_roll=%.2fs)", self.pre_roll)
-
-            elif (not is_speech) and self._in_speech:
-                self._in_speech = False
-                rospy.loginfo("ASR: VAD OFF -> finalize pending (post_roll=%.2fs)", self.post_roll)
-                self._schedule_finalize(post_roll=self.post_roll)
-
-    def _schedule_finalize(self, post_roll: float):
-        self._pending_finalize = True
-        self._finalize_at = time.time() + max(0.0, post_roll)
-
-    # ---------------- timer ----------------
-    def _timer_cb(self, _evt):
-        with self._lock:
-            if not self._pending_finalize:
-                return
-            if time.time() < self._finalize_at:
-                return
-
-            end_now = time.time()
-            post_cut = end_now - self.post_roll
-            post_bytes = bytearray()
-            for t, b in self._ring:
-                if t >= post_cut:
-                    post_bytes.extend(b)
-
-            chunks = bytes(self._seg_bytes) + bytes(post_bytes)
-            self._pending_finalize = False
-            self._seg_bytes = bytearray()
-            self._seg_start_time = None
-
-        if not chunks:
-            return
-
-        raw_text, conf = self._transcribe_bytes_s16le(chunks)
-        raw_text = (raw_text or "").strip()
-        if not raw_text:
-            return
-
-        # publish raw first
-        self.pub_raw.publish(String(data=raw_text))
-
-        # apply corrections -> normalized lower (same behavior as before)
-        text = raw_text
-        if self.enable_corrections:
-            text2 = self.corr.apply(raw_text)
-            if text2:
-                text = text2
-
-        self.pub_text.publish(String(data=text))
-        if self.pub_conf is not None and conf is not None:
-            self.pub_conf.publish(Float32(data=float(conf)))
-
-        # utterance_end pulse (True)
-        self.pub_utt_end.publish(Bool(data=True))
-
-    # ---------------- ASR core ----------------
-    def _transcribe_bytes_s16le(self, pcm_bytes: bytes) -> Tuple[str, Optional[float]]:
-        if self.sample_width != 2 or self.channels != 1:
-            rospy.logwarn("ASR: this node expects S16LE mono (sample_width=2, channels=1)")
-
-        a = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        if a.size < int(self.sample_rate * 0.15):
-            return "", None
-
-        try:
-            kwargs = dict(
-                language=self.language,
-                beam_size=self.beam_size,
-                initial_prompt=self.initial_prompt if self.initial_prompt else None,
-                vad_filter=False,  # external VAD already used
-            )
-
-            # IMPORTANT: hotwords must be a STRING, not list
-            if self.use_hotwords and isinstance(self.hotwords_str, str) and self.hotwords_str.strip():
-                kwargs["hotwords"] = self.hotwords_str
-
-            segments, _info = self.model.transcribe(a, **kwargs)
-            seg_list = list(segments)
-            text = "".join([(s.text or "") for s in seg_list]).strip()
-
-            conf = None
-            try:
-                if seg_list:
-                    avg_lp = float(np.mean([s.avg_logprob for s in seg_list if s.avg_logprob is not None]))
-                    conf = float(1.0 / (1.0 + np.exp(-avg_lp)))  # sigmoid
-            except Exception:
-                conf = None
-
-            return text, conf
-
-        except Exception as e:
-            rospy.logerr("ASR transcribe error: %s", e)
-            return "", None
-
-
-def main():
-    _ = FasterWhisperASRNode()
-    rospy.spin()
-
-
-if __name__ == "__main__":
-    main()
+        self.pub_utt_
