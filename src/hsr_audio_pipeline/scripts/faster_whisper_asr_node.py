@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-hsr_audio_pipeline/scripts/faster_whisper_asr_node.py  (ROS1 Noetic)
+"""faster_whisper_asr_node.py (ROS1 / Noetic)
 
-Fix: prevent Whisper model re-download every boot by using a persistent, writable cache dir.
+Sub:
+  - ~audio_topic  (audio_common_msgs/AudioData) default: /audio/audio
+  - ~vad_topic    (std_msgs/Bool)               default: /vad/is_speech
 
-- NEW params:
-  ~model_cache_dir (str) default: "~/.cache/hf"   # should be bind-mounted or docker volume for persistence
-  ~model_path      (str) default: ""              # if exists, load directly (no download)
-  ~torch_cache_dir (str) default: "~/.cache/torch" # for silero_vad torch.hub cache (optional)
+Pub:
+  - ~raw_text_topic       (std_msgs/String) default: /gpsr/asr/raw_text
+      * pre-correction / pre-normalization (as recognized by Whisper)
+  - ~text_topic           (std_msgs/String) default: /gpsr/asr/text
+      * post-correction / normalized (lowercased + whitespace normalized)
+  - ~utterance_end_topic  (std_msgs/Bool)   default: /gpsr/asr/utterance_end
+  - ~confidence_topic     (std_msgs/Float32) default: /gpsr/asr/confidence (optional)
+
+Key features:
+  - External VAD drives segmentation
+  - pre_roll/post_roll audio appended around the segment
+  - faster-whisper WhisperModel
+  - Loads GPSR vocab YAML via ~vocab_yaml (hotwords + light correction)
+  - Model cache directory (HF/Torch) is configurable and writable fallback is applied
 
 Notes:
-- If ~model_cache_dir is not writable, the node falls back to "~/.cache/hf".
-- For Docker: mount host/volume to the cache directory to persist across container recreations.
+  - faster-whisper "hotwords" must be a STRING, not a list
 """
 
 import os
@@ -21,7 +31,6 @@ import re
 import time
 import yaml
 import threading
-import tempfile
 from collections import deque
 from typing import Dict, List, Tuple, Optional
 
@@ -37,6 +46,7 @@ from faster_whisper import WhisperModel
 # ----------------------------
 # helpers
 # ----------------------------
+
 def _normalize_ws(s: str) -> str:
     s = (s or "").strip()
     s = " ".join(s.split())
@@ -49,7 +59,7 @@ def _lower(s: str) -> str:
 
 def _unique_keep_order(xs: List[str]) -> List[str]:
     seen = set()
-    out = []
+    out: List[str] = []
     for x in xs:
         if x not in seen:
             seen.add(x)
@@ -57,40 +67,26 @@ def _unique_keep_order(xs: List[str]) -> List[str]:
     return out
 
 
-def _expand(p: str) -> str:
-    return os.path.abspath(os.path.expanduser(p.strip())) if p else p
-
-
-def _is_dir_writable(d: str) -> bool:
+def _ensure_writable_dir(path: str) -> Optional[str]:
+    """Create dir if possible. Return path if writable, else None."""
     try:
-        os.makedirs(d, exist_ok=True)
-        # write test
-        with tempfile.NamedTemporaryFile(prefix=".wtest_", dir=d, delete=True) as _:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-def _pick_writable_dir(preferred: str, fallbacks: List[str]) -> str:
-    cand = _expand(preferred) if preferred else ""
-    if cand and _is_dir_writable(cand):
-        return cand
-    for fb in fallbacks:
-        fb2 = _expand(fb)
-        if fb2 and _is_dir_writable(fb2):
-            return fb2
-    # last resort: /tmp
-    tmp = _expand("/tmp/hf_cache")
-    os.makedirs(tmp, exist_ok=True)
-    return tmp
+        os.makedirs(path, exist_ok=True)
+        testfile = os.path.join(path, ".__writable_test__")
+        with open(testfile, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(testfile)
+        return path
+    except Exception as e:
+        rospy.logwarn("Could not create/write dir: %s (%s)", path, e)
+        return None
 
 
 def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
-    """
+    """Parse vocab.yaml.
+
     Returns:
-      words: list[str]  (for hotwords)
-      corrections: dict[str,str] (lowercase mapping for post-correction)
+      words: list[str] for hotwords
+      corrections: dict[str,str] lowercase mapping for post-correction
     """
     with open(path, "r", encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
@@ -98,17 +94,20 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
     words: List[str] = []
     corrections: Dict[str, str] = {}
 
+    # names
     for n in y.get("names", []) or []:
         if isinstance(n, str) and n.strip():
             words.append(n.strip())
 
+    # rooms
     for r in y.get("rooms", []) or []:
         if isinstance(r, str) and r.strip():
-            words.append(r.strip())
             rr = r.strip()
+            words.append(rr)
             if " " in rr:
                 corrections[_lower(rr.replace(" ", ""))] = _lower(rr)
 
+    # locations
     for loc in y.get("locations", []) or []:
         if not isinstance(loc, dict) or "name" not in loc:
             continue
@@ -122,6 +121,7 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
             corrections[_lower(name.replace("-", " "))] = _lower(name.replace("-", " "))
             corrections[_lower(name.replace("-", ""))] = _lower(name.replace("-", " "))
 
+    # categories + objects
     for c in y.get("categories", []) or []:
         if not isinstance(c, dict):
             continue
@@ -143,7 +143,7 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
             if " " in obj:
                 corrections[_lower(obj.replace(" ", ""))] = _lower(obj)
 
-    # small built-in common fixes
+    # common GPSR typos (safe defaults)
     corrections.setdefault("foot", "food")
     corrections.setdefault("past room", "bathroom")
 
@@ -154,7 +154,7 @@ def _words_from_vocab_yaml(path: str) -> Tuple[List[str], Dict[str, str]]:
 
 
 def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
-    tmp = {}
+    tmp: Dict[str, str] = {}
     for w in words:
         ww = _normalize_ws(w)
         if not ww:
@@ -168,11 +168,17 @@ def _build_hotwords_string(words: List[str], max_terms: int = 250) -> str:
 
 
 class CorrectionEngine:
+    """Light post-ASR correction (lowercased)."""
+
     def __init__(self, mapping: Dict[str, str]):
-        self.mapping = {_lower(k): _lower(v) for k, v in (mapping or {}).items() if _lower(k) and _lower(v)}
-        self.keys = sorted(self.mapping.keys(), key=lambda s: -len(s))
+        self.mapping = {
+            _lower(k): _lower(v)
+            for k, v in (mapping or {}).items()
+            if _lower(k) and _lower(v)
+        }
+        keys = sorted(self.mapping.keys(), key=lambda s: -len(s))
         self.patterns: List[Tuple[re.Pattern, str]] = []
-        for k in self.keys:
+        for k in keys:
             pat = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
             self.patterns.append((pat, self.mapping[k]))
 
@@ -188,6 +194,7 @@ class CorrectionEngine:
 # ----------------------------
 # Node
 # ----------------------------
+
 class FasterWhisperASRNode:
     def __init__(self):
         rospy.init_node("faster_whisper_asr_node")
@@ -196,6 +203,7 @@ class FasterWhisperASRNode:
         self.audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
         self.vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
 
+        self.raw_text_topic = rospy.get_param("~raw_text_topic", "/gpsr/asr/raw_text")
         self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
         self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
         self.conf_topic = rospy.get_param("~confidence_topic", "/gpsr/asr/confidence")
@@ -209,45 +217,66 @@ class FasterWhisperASRNode:
         self.post_roll = float(rospy.get_param("~post_roll", 0.35))
         self.max_segment_sec = float(rospy.get_param("~max_segment_sec", 18.0))
 
-        # faster-whisper
+        # faster-whisper model
         self.model_size = rospy.get_param("~model_size", "small")
+        self.model_path = rospy.get_param("~model_path", "")  # optional local path
         self.device = rospy.get_param("~device", "cpu")
         self.compute_type = rospy.get_param("~compute_type", "float32")
         self.language = rospy.get_param("~language", "en")
         self.beam_size = int(rospy.get_param("~beam_size", 5))
 
-        # Cache settings (fix re-download)
-        self.model_path = _expand(rospy.get_param("~model_path", ""))
-        preferred_cache = rospy.get_param("~model_cache_dir", "~/.cache/hf")
-        self.model_cache_dir = _pick_writable_dir(preferred_cache, ["~/.cache/hf", "~/.cache", "/hsr_ws/.cache/hf"])
-        self.torch_cache_dir = _pick_writable_dir(rospy.get_param("~torch_cache_dir", "~/.cache/torch"),
-                                                  ["~/.cache/torch", "~/.cache", "/hsr_ws/.cache/torch"])
-
-        # Force HF cache envs (so snapshot_download reuses)
-        hf_home = self.model_cache_dir
-        hub_cache = os.path.join(self.model_cache_dir, "hub")
-        xdg_cache = os.path.join(self.model_cache_dir, "xdg")
-        os.makedirs(hub_cache, exist_ok=True)
-        os.makedirs(xdg_cache, exist_ok=True)
-        os.environ["HF_HOME"] = hf_home
-        os.environ["HUGGINGFACE_HUB_CACHE"] = hub_cache
-        os.environ["TRANSFORMERS_CACHE"] = os.path.join(self.model_cache_dir, "transformers")
-        os.environ["XDG_CACHE_HOME"] = xdg_cache
-
-        # Torch hub cache (silero_vad uses torch.hub)
-        os.environ.setdefault("TORCH_HOME", self.torch_cache_dir)
+        # cache dirs (must be writable)
+        self.model_cache_dir = rospy.get_param("~model_cache_dir", os.path.expanduser("~/.cache/hf"))
+        self.torch_cache_dir = rospy.get_param("~torch_cache_dir", os.path.expanduser("~/.cache/torch"))
 
         # prompts / hotwords
         self.use_hotwords = bool(rospy.get_param("~use_hotwords", True))
         self.vocab_yaml = rospy.get_param("~vocab_yaml", "")
         self.max_hotwords_terms = int(rospy.get_param("~max_hotwords_terms", 250))
+
         self.initial_prompt = rospy.get_param(
             "~initial_prompt",
             "You are a home service robot. Transcribe spoken GPSR commands in English accurately."
         )
+
+        # publish confidence?
         self.publish_confidence = bool(rospy.get_param("~publish_confidence", True))
 
-        # vocab -> hotwords + corrections
+        # corrections
+        self.enable_corrections = bool(rospy.get_param("~enable_corrections", True))
+
+        # ---- setup caches (writable fallback) ----
+        chosen_hf = _ensure_writable_dir(self.model_cache_dir)
+        if chosen_hf is None:
+            fallback = os.path.expanduser("~/.cache/hf")
+            chosen_hf = _ensure_writable_dir(fallback)
+            if chosen_hf is None:
+                # last resort: current dir (not ideal)
+                chosen_hf = os.getcwd()
+                rospy.logwarn("Falling back HF cache to cwd: %s", chosen_hf)
+        self.model_cache_dir = chosen_hf
+
+        chosen_torch = _ensure_writable_dir(self.torch_cache_dir)
+        if chosen_torch is None:
+            fallback = os.path.expanduser("~/.cache/torch")
+            chosen_torch = _ensure_writable_dir(fallback) or os.getcwd()
+        self.torch_cache_dir = chosen_torch
+
+        # set env so HuggingFace + torch.hub reuse cache
+        os.environ.setdefault("HF_HOME", self.model_cache_dir)
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(self.model_cache_dir, "hub"))
+        os.environ.setdefault("XDG_CACHE_HOME", os.path.join(self.model_cache_dir, "xdg"))
+        os.environ.setdefault("TORCH_HOME", self.torch_cache_dir)
+
+        rospy.loginfo(
+            "HF cache: HF_HOME=%s HUGGINGFACE_HUB_CACHE=%s XDG_CACHE_HOME=%s TORCH_HOME=%s",
+            os.environ.get("HF_HOME"),
+            os.environ.get("HUGGINGFACE_HUB_CACHE"),
+            os.environ.get("XDG_CACHE_HOME"),
+            os.environ.get("TORCH_HOME"),
+        )
+
+        # ---- vocab -> hotwords + corrections ----
         self.hotwords_str = ""
         self.corr = CorrectionEngine({})
         if self.vocab_yaml and os.path.exists(self.vocab_yaml):
@@ -256,24 +285,33 @@ class FasterWhisperASRNode:
                 if self.use_hotwords:
                     self.hotwords_str = _build_hotwords_string(words, max_terms=self.max_hotwords_terms)
                 self.corr = CorrectionEngine(corr_map)
-                rospy.loginfo("Loaded vocab_yaml: %s (hotwords_terms=%d)", self.vocab_yaml, len(self.hotwords_str.split()))
+                rospy.loginfo(
+                    "Loaded vocab_yaml: %s (hotwords_terms=%d, corrections=%d)",
+                    self.vocab_yaml,
+                    len(self.hotwords_str.split()),
+                    len(corr_map),
+                )
             except Exception as e:
                 rospy.logwarn("Failed to load vocab_yaml=%s: %s", self.vocab_yaml, e)
         else:
             if self.vocab_yaml:
-                rospy.logwarn("vocab_yaml not found: %s (hotwords disabled)", self.vocab_yaml)
+                rospy.logwarn("vocab_yaml not found: %s (hotwords/corrections disabled)", self.vocab_yaml)
 
-        rospy.loginfo("HF cache effective: %s", self.model_cache_dir)
-        rospy.loginfo("TORCH_HOME effective: %s", os.environ.get("TORCH_HOME"))
+        # ---- model ----
+        model_id = None
+        if self.model_path and os.path.exists(self.model_path):
+            model_id = self.model_path
+        else:
+            if self.model_path:
+                rospy.logwarn("model_path set but not found: %s (fallback to model_size=%s)", self.model_path, self.model_size)
+            model_id = self.model_size
 
-        # model load: local path first if exists; else model_size with download_root to cache dir
-        model_id = self.model_path if (self.model_path and os.path.exists(self.model_path)) else self.model_size
-        if self.model_path and not os.path.exists(self.model_path):
-            rospy.logwarn("model_path set but not found: %s (fallback to model_size=%s)", self.model_path, self.model_size)
+        rospy.loginfo(
+            "Loading WhisperModel: model=%s device=%s compute_type=%s download_root=%s",
+            model_id, self.device, self.compute_type, self.model_cache_dir
+        )
 
-        rospy.loginfo("Loading WhisperModel: model=%s device=%s compute_type=%s download_root=%s",
-                      model_id, self.device, self.compute_type, self.model_cache_dir)
-
+        # download_root is respected by faster-whisper for HF snapshots
         self.model = WhisperModel(
             model_id,
             device=self.device,
@@ -281,29 +319,36 @@ class FasterWhisperASRNode:
             download_root=self.model_cache_dir,
         )
 
-        # ROS pub/sub
+        # ---- ROS pub/sub ----
+        self.pub_raw_text = rospy.Publisher(self.raw_text_topic, String, queue_size=10)
         self.pub_text = rospy.Publisher(self.text_topic, String, queue_size=10)
         self.pub_utt_end = rospy.Publisher(self.utt_end_topic, Bool, queue_size=10)
-        self.pub_conf = rospy.Publisher(self.conf_topic, Float32, queue_size=10) if self.publish_confidence else None
+
+        self.pub_conf = None
+        if self.publish_confidence:
+            self.pub_conf = rospy.Publisher(self.conf_topic, Float32, queue_size=10)
 
         rospy.Subscriber(self.audio_topic, AudioData, self._on_audio, queue_size=200)
         rospy.Subscriber(self.vad_topic, Bool, self._on_vad, queue_size=50)
 
-        # audio buffers
+        # ---- audio buffers ----
         self._lock = threading.Lock()
-        self._ring = deque()  # (t_wall, bytes)
+        self._ring = deque()  # list of (t, bytes)
         self._ring_max_sec = max(3.0, self.pre_roll + self.max_segment_sec + self.post_roll + 1.0)
 
         self._in_speech = False
         self._seg_bytes = bytearray()
-        self._seg_start_time = None
+        self._seg_start_time: Optional[float] = None
 
         self._pending_finalize = False
-        self._finalize_at = 0.0  # wall time
+        self._finalize_at = 0.0
+
         self._timer = rospy.Timer(rospy.Duration(0.05), self._timer_cb)
 
-        rospy.loginfo("FasterWhisperASRNode started. audio=%s vad=%s -> text=%s utt_end=%s",
-                      self.audio_topic, self.vad_topic, self.text_topic, self.utt_end_topic)
+        rospy.loginfo(
+            "FasterWhisperASRNode ready: audio=%s vad=%s -> raw=%s text=%s end=%s",
+            self.audio_topic, self.vad_topic, self.raw_text_topic, self.text_topic, self.utt_end_topic
+        )
 
     # ---------------- audio callbacks ----------------
     def _on_audio(self, msg: AudioData):
@@ -370,24 +415,35 @@ class FasterWhisperASRNode:
 
         if not chunks:
             return
-        text, conf = self._transcribe_bytes_s16le(chunks)
 
-        if text:
-            text2 = self.corr.apply(text)
-            if text2:
-                text = text2
+        raw_text, conf = self._transcribe_bytes_s16le(chunks)
+        raw_text = (raw_text or "").strip()
 
-            self.pub_text.publish(String(data=text))
-            if self.pub_conf is not None and conf is not None:
-                self.pub_conf.publish(Float32(data=float(conf)))
-            self.pub_utt_end.publish(Bool(data=True))
+        if raw_text:
+            # publish raw (as-is from ASR)
+            self.pub_raw_text.publish(String(data=raw_text))
+
+            # publish corrected/normalized
+            out_text = raw_text
+            if self.enable_corrections:
+                out_text = self.corr.apply(out_text)
+            else:
+                out_text = _lower(out_text)
+
+            if out_text:
+                self.pub_text.publish(String(data=out_text))
+                if self.pub_conf is not None and conf is not None:
+                    self.pub_conf.publish(Float32(data=float(conf)))
+
+                # utterance_end pulse
+                self.pub_utt_end.publish(Bool(data=True))
 
     # ---------------- ASR core ----------------
     def _transcribe_bytes_s16le(self, pcm_bytes: bytes) -> Tuple[str, Optional[float]]:
         if self.sample_width != 2 or self.channels != 1:
-            rospy.logwarn("ASR: only supports S16LE mono (sample_width=2, channels=1)")
-        a = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            rospy.logwarn("ASR: only supports S16LE mono in this node (sample_width=2, channels=1)")
 
+        a = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         if a.size < int(self.sample_rate * 0.15):
             return "", None
 
@@ -400,7 +456,7 @@ class FasterWhisperASRNode:
             )
 
             if self.use_hotwords and isinstance(self.hotwords_str, str) and self.hotwords_str.strip():
-                kwargs["hotwords"] = self.hotwords_str
+                kwargs["hotwords"] = self.hotwords_str  # MUST be string
 
             segments, _info = self.model.transcribe(a, **kwargs)
             seg_list = list(segments)
