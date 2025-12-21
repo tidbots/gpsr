@@ -1,160 +1,197 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import rospy
+"""
+silero_vad_node.py (ROS1 / Noetic)
+
+Sub:
+  - ~audio_topic (audio_common_msgs/AudioData) default: /audio/audio
+
+Pub:
+  - ~vad_topic   (std_msgs/Bool)               default: /vad/is_speech
+  - (optional) ~prob_topic (std_msgs/Float32)  default: /vad/prob
+
+Features:
+  - Uses Silero VAD via torch.hub
+  - Respects TORCH_HOME (persistable) and allows ROS params:
+      ~torch_home      (default: /data/models/torch)
+      ~torch_hub_dir   (default: <torch_home>/hub)
+    If not writable -> fallback to ~/.cache/hsr_models/torch
+  - Simple state machine with thresholds + hangover
+"""
+
+import os
+import time
+from typing import Optional
+
 import numpy as np
-from std_msgs.msg import Bool
+import rospy
+
+from std_msgs.msg import Bool, Float32
 from audio_common_msgs.msg import AudioData
 
-import torch
+
+def _ensure_writable_dir(preferred: str, fallback: str, label: str) -> str:
+    preferred = os.path.expanduser(preferred or "")
+    fallback = os.path.expanduser(fallback or "")
+
+    def _try(path: str) -> bool:
+        if not path:
+            return False
+        try:
+            os.makedirs(path, exist_ok=True)
+            testfile = os.path.join(path, ".write_test")
+            with open(testfile, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(testfile)
+            return True
+        except Exception as e:
+            rospy.logwarn("Could not create/use %s dir: %s (%s)", label, path, e)
+            return False
+
+    if _try(preferred):
+        return preferred
+    if _try(fallback):
+        rospy.logwarn("%s dir fallback -> %s", label, fallback)
+        return fallback
+
+    rospy.logwarn("%s dir fallback -> (.)", label)
+    return "."
 
 
-class SileroVADNode(object):
-    """ROS1 node using Silero VAD.
-
-    - subscribe: audio_common_msgs/AudioData (16 kHz, mono, int16 PCM)
-    - publish : std_msgs/Bool on /vad/is_speech
-    - processes 32 ms chunks (512 samples @ 16kHz, 256 @ 8kHz)
-    """
-
+class SileroVADNode:
     def __init__(self):
-        # Parameters
+        rospy.init_node("silero_vad")
+
+        # ---- params ----
         self.audio_topic = rospy.get_param("~audio_topic", "/audio/audio")
         self.vad_topic = rospy.get_param("~vad_topic", "/vad/is_speech")
+        self.prob_topic = rospy.get_param("~prob_topic", "/vad/prob")
+        self.publish_prob = bool(rospy.get_param("~publish_prob", False))
 
         self.sample_rate = int(rospy.get_param("~sample_rate", 16000))
-        # Silero VAD は 8kHz / 16kHz のみ
-        if self.sample_rate not in (8000, 16000):
-            rospy.logwarn(
-                "SileroVADNode: sample_rate %d is not 8000 or 16000, "
-                "forcing to 16000 for Silero VAD.",
-                self.sample_rate,
-            )
-            self.sample_rate = 16000
 
-        # 512 samples at 16kHz ≈ 32 ms
-        # 256 samples at 8kHz  ≈ 32 ms
-        self.chunk_size = 512 if self.sample_rate == 16000 else 256
+        # chunk_size in samples (Silero works well with 256/512/1024 @16k)
+        self.chunk_size = int(rospy.get_param("~chunk_size", 512))
 
-        # しきい値（あとで rosparam で微調整できます）
-        self.speech_threshold = float(rospy.get_param("~speech_threshold", 0.5))
+        # thresholds
+        self.speech_threshold = float(rospy.get_param("~speech_threshold", 0.6))
         self.silence_threshold = float(rospy.get_param("~silence_threshold", 0.3))
-        self.hangover_ms = int(rospy.get_param("~hangover_ms", 300))
 
-        # hangover を「何チャンク分続けるか」に変換
-        self.hangover_chunks = max(
-            1,
-            int(
-                round(
-                    (self.hangover_ms / 1000.0)
-                    * (self.sample_rate / float(self.chunk_size))
-                )
-            ),
-        )
+        # hangover in ms: after speech drops below silence_threshold, keep "speech" for a while
+        self.hangover_ms = int(rospy.get_param("~hangover_ms", 400))
 
-        # 内部状態
-        self.buffer = np.array([], dtype=np.int16)
-        self.current_is_speech = False
-        self.hangover_count = 0
+        # ---- persistent torch cache ----
+        preferred_torch_home = rospy.get_param("~torch_home", "/data/models/torch")
+        fallback_torch_home = os.path.expanduser("~/.cache/hsr_models/torch")
+        self.torch_home = _ensure_writable_dir(preferred_torch_home, fallback_torch_home, "torch_home")
 
-        # Silero VAD モデル読み込み
-        torch.set_num_threads(1)
+        preferred_hub_dir = rospy.get_param("~torch_hub_dir", os.path.join(self.torch_home, "hub"))
+        fallback_hub_dir = os.path.join(self.torch_home, "hub")
+        self.torch_hub_dir = _ensure_writable_dir(preferred_hub_dir, fallback_hub_dir, "torch_hub_dir")
+
+        # Ensure env + torch hub dir
+        os.environ["TORCH_HOME"] = self.torch_home
+
+        import torch
+        # torch.hub cache dir is separate; set explicitly
+        try:
+            torch.hub.set_dir(self.torch_hub_dir)
+        except Exception as e:
+            rospy.logwarn("torch.hub.set_dir failed (%s). Continuing.", e)
+
+        rospy.loginfo("SileroVAD: TORCH_HOME=%s torch_hub_dir=%s", os.environ["TORCH_HOME"], self.torch_hub_dir)
+
+        # ---- load model ----
         rospy.loginfo("SileroVADNode: loading Silero VAD model via torch.hub...")
-        self.model, _ = torch.hub.load(
+        # NOTE: trust_repo=True avoids future prompt-like behavior
+        self.model, _utils = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
+            trust_repo=True,
             force_reload=False,
         )
         self.model.eval()
         rospy.loginfo("SileroVADNode: model loaded.")
 
-        # ROS pub/sub
+        # ---- state ----
+        self._buf = np.zeros((0,), dtype=np.float32)
+        self._is_speech = False
+
+        # how many chunks to keep speech after silence
+        chunk_ms = (self.chunk_size / float(self.sample_rate)) * 1000.0
+        self._hangover_chunks = max(0, int(round(self.hangover_ms / chunk_ms)))
+        self._hang_counter = 0
+
+        # ---- ROS pub/sub ----
         self.pub_vad = rospy.Publisher(self.vad_topic, Bool, queue_size=10)
-        rospy.Subscriber(
-            self.audio_topic, AudioData, self.audio_callback, queue_size=100
-        )
+        self.pub_prob = rospy.Publisher(self.prob_topic, Float32, queue_size=10) if self.publish_prob else None
+
+        rospy.Subscriber(self.audio_topic, AudioData, self._on_audio, queue_size=200)
 
         rospy.loginfo(
-            "SileroVADNode: audio_topic=%s vad_topic=%s sample_rate=%d chunk_size=%d "
-            "thresholds=(speech=%.2f, silence=%.2f) hangover_chunks=%d",
-            self.audio_topic,
-            self.vad_topic,
-            self.sample_rate,
-            self.chunk_size,
-            self.speech_threshold,
-            self.silence_threshold,
-            self.hangover_chunks,
+            "SileroVADNode ready: audio_topic=%s vad_topic=%s sample_rate=%d chunk_size=%d thresholds=(speech=%.2f silence=%.2f) hangover_chunks=%d",
+            self.audio_topic, self.vad_topic, self.sample_rate, self.chunk_size,
+            self.speech_threshold, self.silence_threshold, self._hangover_chunks
         )
 
-    def audio_callback(self, msg: AudioData):
-        # AudioData.data は bytes (int16 PCM を想定)
-        data = np.frombuffer(msg.data, dtype=np.int16)
-        if data.size == 0:
+    def _publish_state(self, is_speech: bool, prob: Optional[float] = None):
+        # publish every update (cheap and easier to debug)
+        self.pub_vad.publish(Bool(data=bool(is_speech)))
+        if self.pub_prob is not None and prob is not None:
+            self.pub_prob.publish(Float32(data=float(prob)))
+
+    def _on_audio(self, msg: AudioData):
+        # Expect S16LE mono from audio_capture
+        pcm = np.frombuffer(bytes(msg.data), dtype=np.int16).astype(np.float32) / 32768.0
+        if pcm.size == 0:
             return
 
-        # バッファに溜める
-        self.buffer = np.concatenate([self.buffer, data])
+        # append to buffer
+        self._buf = np.concatenate([self._buf, pcm])
 
-        # chunk_size 以上たまったら処理
-        while self.buffer.size >= self.chunk_size:
-            chunk_int16 = self.buffer[: self.chunk_size]
-            self.buffer = self.buffer[self.chunk_size :]
+        import torch
 
-            speech_prob = self._infer_chunk(chunk_int16)
-            self._update_state_and_publish(speech_prob)
+        # process in fixed-size chunks
+        while self._buf.size >= self.chunk_size:
+            chunk = self._buf[: self.chunk_size]
+            self._buf = self._buf[self.chunk_size :]
 
-    def _infer_chunk(self, chunk_int16: np.ndarray) -> float:
-        # int16 → float32[-1, 1] に正規化
-        audio_float32 = chunk_int16.astype(np.float32)
-        abs_max = np.max(np.abs(audio_float32))
-        if abs_max > 0:
-            audio_float32 = audio_float32 / 32768.0
-        audio_tensor = torch.from_numpy(audio_float32)
+            with torch.no_grad():
+                t = torch.from_numpy(chunk)
+                # Silero expects 1D float tensor and sample_rate int
+                prob = float(self.model(t, self.sample_rate).item())
 
-        # Silero VAD: model(waveform, sample_rate) → speech probability
-        with torch.no_grad():
-            prob = float(self.model(audio_tensor, self.sample_rate).item())
-
-        return prob
-
-    def _update_state_and_publish(self, speech_prob: float):
-        """ヒステリシス + hangover で /vad/is_speech を安定させる."""
-
-        if speech_prob >= self.speech_threshold:
-            # 音声が "ある" と判断
-            if not self.current_is_speech:
-                rospy.loginfo(
-                    "SileroVADNode: speech start (prob=%.3f)", speech_prob
-                )
-            self.current_is_speech = True
-            self.hangover_count = self.hangover_chunks
-        else:
-            # 既に発話中なら hangover カウントダウン
-            if self.current_is_speech:
-                self.hangover_count -= 1
-                if self.hangover_count <= 0 and speech_prob <= self.silence_threshold:
-                    # 発話終了
-                    self.current_is_speech = False
-                    rospy.loginfo(
-                        "SileroVADNode: speech end (prob=%.3f)", speech_prob
-                    )
+            # state machine
+            if not self._is_speech:
+                if prob >= self.speech_threshold:
+                    self._is_speech = True
+                    self._hang_counter = self._hangover_chunks
+                    rospy.loginfo("SileroVADNode: speech start (prob=%.3f)", prob)
+                self._publish_state(self._is_speech, prob)
             else:
-                # もともと無音
-                self.current_is_speech = False
-                self.hangover_count = 0
-
-        # /vad/is_speech を publish
-        self.pub_vad.publish(Bool(data=self.current_is_speech))
-
-    def spin(self):
-        rospy.spin()
+                # currently speech
+                if prob >= self.speech_threshold:
+                    self._hang_counter = self._hangover_chunks
+                    self._publish_state(True, prob)
+                elif prob <= self.silence_threshold:
+                    if self._hang_counter > 0:
+                        self._hang_counter -= 1
+                        self._publish_state(True, prob)
+                    else:
+                        self._is_speech = False
+                        rospy.loginfo("SileroVADNode: speech end (prob=%.3f)", prob)
+                        self._publish_state(False, prob)
+                else:
+                    # between thresholds: keep previous state, decay hangover slowly
+                    if self._hang_counter > 0:
+                        self._hang_counter -= 1
+                    self._publish_state(True, prob)
 
 
 def main():
-    rospy.init_node("silero_vad_node")
-    node = SileroVADNode()
-    rospy.loginfo("silero_vad_node started.")
-    node.spin()
+    _ = SileroVADNode()
+    rospy.spin()
 
 
 if __name__ == "__main__":
