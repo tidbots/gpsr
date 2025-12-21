@@ -1,6 +1,6 @@
 <launch>
-  <!-- 語彙YAML（年ごとに差し替えるだけ） -->
-  <arg name="vocab_yaml" default="$(find hsr_audio_pipeline)/config/vocab.yaml"/>
+  <arg name="vocab_yaml" default="/data/vocab/vocab.yaml"/>
+  <arg name="corrections_yaml" default="/data/vocab/corrections.yaml"/>
 
   <!-- =======================
        audio_capture
@@ -63,8 +63,13 @@
     <param name="confidence_topic"    value="/gpsr/asr/confidence" />
     <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
 
+    <!-- 永続: whisper/hf cache + torch -->
+    <param name="model_cache_dir" value="/data/models/hf" />
+    <param name="torch_home"      value="/data/models/torch" />
+
     <!-- NEW: vocab -->
     <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
+    <param name="corrections_yaml" value="$(arg corrections_yaml)"/>
     <param name="use_hotwords" value="true"/>
 
     <!-- Model -->
@@ -76,6 +81,7 @@
     <!-- Segmentation（※差し替え版のparam名に合わせる） -->
     <param name="pre_roll" value="0.25" />
     <param name="post_roll" value="0.35" />
+    <param name="min_segment_sec" value="0.6" />
     <param name="max_segment_sec" value="18.0" />
   </node>
 
