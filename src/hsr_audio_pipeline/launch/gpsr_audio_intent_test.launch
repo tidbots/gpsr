@@ -1,4 +1,11 @@
 <launch>
+   <arg name="vocab_dir" default="/data/vocab"/>
+  <arg name="names_md" default="$(arg vocab_dir)/names.md"/>
+  <arg name="rooms_md" default="$(arg vocab_dir)/room_names.md"/>
+  <arg name="locations_md" default="$(arg vocab_dir)/location_names.md"/>
+  <arg name="objects_md" default="$(arg vocab_dir)/objects.md"/>
+  <arg name="test_objects_md" default="$(arg vocab_dir)/test_objects.md"/>
+
   <arg name="vocab_yaml" default="/data/vocab/vocab.yaml"/>
   <arg name="corrections_yaml" default="/data/vocab/corrections.yaml"/>
 
@@ -72,6 +79,13 @@
     <param name="corrections_yaml" value="$(arg corrections_yaml)"/>
     <param name="use_hotwords" value="true"/>
 
+    <param name="vocab_dir" value="$(arg vocab_dir)"/>
+    <param name="names_md" value="$(arg names_md)"/>
+    <param name="rooms_md" value="$(arg rooms_md)"/>
+    <param name="locations_md" value="$(arg locations_md)"/>
+    <param name="objects_md" value="$(arg objects_md)"/>
+    <param name="test_objects_md" value="$(arg test_objects_md)"/>
+
     <!-- Model -->
     <param name="model_size" value="small" />
     <param name="device" value="cpu" />           <!-- GPUなら cuda -->
@@ -96,6 +110,13 @@
 
     <!-- NEW: vocab -->
     <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
+
+    <param name="vocab_dir" value="$(arg vocab_dir)"/>
+    <param name="names_md" value="$(arg names_md)"/>
+    <param name="rooms_md" value="$(arg rooms_md)"/>
+    <param name="locations_md" value="$(arg locations_md)"/>
+    <param name="objects_md" value="$(arg objects_md)"/>
+    <param name="test_objects_md" value="$(arg test_objects_md)"/>
 
     <!-- Unified intent output -->
     <param name="intent_topic" value="/gpsr/intent" />
