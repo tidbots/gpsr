@@ -47,8 +47,8 @@
     <param name="channels" value="1" />
 　　<param name="raw_text_topic" value="/gpsr/asr/raw_text" />
 
-    <param name="model_cache_dir" value="/home/roboworks/gpsr_data/models/hf"/>
-    <param name="torch_home"      value="/home/roboworks/gpsr_data/models/torch"/>
+    <param name="model_cache_dir" value="/data/models/hf"/>
+    <param name="torch_home"      value="/data/models/torch"/>
 　　<!-- 任意：ローカルに置いたモデルを使うなら -->
 　　<param name="model_path" value="/data/models/whisper/small"/>
 
