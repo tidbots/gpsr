@@ -56,7 +56,7 @@
     <param name="model_cache_dir" value="/data/models/hf"/>
     <param name="torch_home"      value="/data/models/torch"/>
 　　<!-- 任意：ローカルに置いたモデルを使うなら -->
-　　<param name="model_path" value="/data/models/whisper/small"/>
+　　<!-- <param name="model_path" value="/data/models/whisper/small"/> -->
 
     <!-- GPSR ASR outputs（※差し替え版のparam名に合わせる） -->
     <param name="text_topic"          value="/gpsr/asr/text" />
