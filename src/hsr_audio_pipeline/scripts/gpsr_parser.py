@@ -8,12 +8,15 @@ RoboCup@Home GPSR command parser.
 Whisper/Faster-Whisper の文字起こし結果 (英語テキスト) を、
 gpsr_commands.CommandGenerator が使っているコマンド種別 (kind) と
 スロット (room / object / category / person など) に逆変換する。
+
+NOTE:
+- it/them の参照解決（object省略補完）は gpsr_parser_node.py 側で行う前提。
+  ここでは "bring it ..." などをステップとして生成することに集中する。
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-import json
 import re
 
 
@@ -39,11 +42,12 @@ def split_into_clauses(text: str) -> List[str]:
     """
     GPSR向け：then / and then を主な句切りにする。
     'and' 単体は名詞句や修飾の中で頻出なので、原則として句切りに使わない。
+
+    ただし then の後に "get it and bring it ..." のような複合が出るので、
+    その分解は _parse_clause_multi 側で行う。
     """
     t = normalize_text(text).strip().strip(".")
-    # "and then" を then に寄せる
     t = re.sub(r"\band then\b", " then ", t)
-    # then で区切る
     parts = [p.strip() for p in re.split(r"\bthen\b", t) if p.strip()]
     return parts
 
@@ -179,6 +183,18 @@ class GpsrParser:
             return None
         return best_match(token, self.placement_location_names + self.location_names)
 
+    def match_room(self, s: str) -> Optional[str]:
+        token = self._strip_articles(s)
+        if not token:
+            return None
+        return best_match(token, self.room_names)
+
+    def match_name(self, s: str) -> Optional[str]:
+        token = self._strip_articles(s)
+        if not token:
+            return None
+        return best_match(token, self.person_names)
+
     # ================= エントリ =================
 
     def parse(self, text: str) -> Optional[GpsrCommand]:
@@ -192,9 +208,9 @@ class GpsrParser:
         kinds: List[str] = []
 
         for c in clauses:
-            step, kind = self._parse_clause(c)
-            if step:
-                steps.append(step)
+            s_list, kind = self._parse_clause_multi(c)  # ★複数step対応
+            if s_list:
+                steps.extend(s_list)
             if kind:
                 kinds.append(kind)
 
@@ -230,6 +246,37 @@ class GpsrParser:
 
     # ================= clause parser =================
 
+    def _parse_clause_multi(self, clause: str) -> tuple[List[GpsrStep], Optional[str]]:
+        """
+        1 clause から複数 step を作れる版。
+        典型： "get it and bring it to me"
+        """
+        c = clause.strip().strip(".")
+        if not c:
+            return [], None
+
+        # まず "get it and <rest>" を分解（GPSRの典型）
+        m = re.match(r"^(get it|take it|grab it|pick it up|get them|take them|grab them)\s+and\s+(.+)$", c)
+        if m:
+            first = m.group(1).strip()
+            rest = m.group(2).strip()
+
+            steps: List[GpsrStep] = []
+            s1, k1 = self._parse_clause(first)
+            if s1:
+                steps.append(s1)
+
+            s2, k2 = self._parse_clause(rest)
+            if s2:
+                steps.append(s2)
+
+            # kind は後段優先（bring/deliver が取れたらそっち）
+            return steps, (k2 or k1 or "takeObj")
+
+        # その他は従来通り
+        s, k = self._parse_clause(c)
+        return ([s] if s else []), k
+
     def _parse_clause(self, clause: str) -> tuple[Optional[GpsrStep], Optional[str]]:
         c = clause.strip().strip(".")
         if not c:
@@ -237,6 +284,11 @@ class GpsrParser:
 
         # order matters (more specific first)
         for fn in [
+            # ★追加：it/them を目的語にした bring/deliver/give/hand
+            self._parse_bring_it_to_me,
+            self._parse_bring_it_to_person_in_room,
+
+            # existing
             self._parse_bring_me_obj_from_place,
             self._parse_find_obj_in_room,
             self._parse_place_obj_on_place,
@@ -251,6 +303,29 @@ class GpsrParser:
                 return step, kind
 
         return None, None
+
+    # ---- bring it to me (NEW) ----
+    def _parse_bring_it_to_me(self, clause: str) -> tuple[Optional[GpsrStep], Optional[str]]:
+        # "bring it to me" / "deliver it to me" / "give it to me" / "hand it to me"
+        if not re.match(r"^(?:bring|deliver|give|hand)\s+(?:it|them)\s+to\s+me$", clause):
+            return None, None
+        # object は gpsr_parser_node.py 側が state から補完
+        return GpsrStep(action="bring_object_to_operator", fields={}), "bringItToMe"
+
+    # ---- bring it to the sitting person in the office (NEW) ----
+    def _parse_bring_it_to_person_in_room(self, clause: str) -> tuple[Optional[GpsrStep], Optional[str]]:
+        # "bring it to the sitting person in the office"
+        m = re.match(r"^(?:bring|deliver|give|hand)\s+(?:it|them)\s+to\s+the\s+(.+?)\s+in the\s+(.+)$", clause)
+        if not m:
+            return None, None
+        person_filter = m.group(1).strip()
+        room = self.match_room(m.group(2).strip())
+        if not room:
+            return None, None
+        return (
+            GpsrStep(action="deliver_object_to_person_in_room", fields={"room": room, "person_filter": person_filter}),
+            "deliverItToPrsInRoom",
+        )
 
     # ---- bringMeObjFromPlcmt ----
     def _parse_bring_me_obj_from_place(self, clause: str) -> tuple[Optional[GpsrStep], Optional[str]]:
@@ -292,7 +367,7 @@ class GpsrParser:
 
         obj_str = m.group(1).strip()
         room_str = m.group(2).strip()
-        room = best_match(room_str, self.room_names)
+        room = self.match_room(room_str)
         if not room:
             return None, None
 
@@ -335,7 +410,7 @@ class GpsrParser:
     # ---- takeObj ----
     def _parse_take_object(self, clause: str) -> tuple[Optional[GpsrStep], Optional[str]]:
         # "get it" / "take it"
-        if clause in ("get it", "take it", "grab it", "pick it up"):
+        if clause in ("get it", "take it", "grab it", "pick it up", "get them", "take them", "grab them"):
             return GpsrStep(action="take_object", fields={}), "takeObj"
         # "get a drink" のような単独
         m = re.search(r"^(?:get|take|grasp|grab)\s+(?:a|an|the)?\s*(.+)$", clause)
@@ -354,7 +429,7 @@ class GpsrParser:
             return None, None
 
         ppl = self._strip_articles(m.group(1).strip())
-        room = best_match(m.group(2).strip(), self.room_names)
+        room = self.match_room(m.group(2).strip())
         if not room:
             return None, None
 
@@ -372,7 +447,7 @@ class GpsrParser:
             return None, None
 
         person_filter = m.group(1).strip()
-        room = best_match(m.group(2).strip(), self.room_names)
+        room = self.match_room(m.group(2).strip())
         if not room:
             return None, None
 
@@ -394,7 +469,7 @@ class GpsrParser:
         fr_str = m.group(2).strip()
         to_str = m.group(3).strip()
 
-        name = best_match(name_str, self.person_names) or name_str
+        name = self.match_name(name_str) or name_str
         fr = self.match_place(fr_str)
         to = self.match_place(to_str)
         if not fr or not to:
@@ -411,7 +486,7 @@ class GpsrParser:
             return None, None
         dest = m.group(1).strip()
         # room優先
-        room = best_match(dest, self.room_names)
+        room = self.match_room(dest)
         if room:
             return GpsrStep(action="go_to_location", fields={"room": room}), "goToLoc"
         plc = self.match_place(dest)
