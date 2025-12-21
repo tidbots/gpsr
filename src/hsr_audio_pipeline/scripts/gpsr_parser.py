@@ -37,18 +37,14 @@ def normalize_text(text: str) -> str:
 
 def split_into_clauses(text: str) -> List[str]:
     """
-    "then" / "and then" / "and" でざっくり節に分割する。
+    GPSR向け：then / and then を主な句切りにする。
+    'and' 単体は名詞句や修飾の中で頻出なので、原則として句切りに使わない。
     """
-    t = normalize_text(text)
-    t = t.strip().strip(".")
-    # and then / then を優先
+    t = normalize_text(text).strip().strip(".")
+    # "and then" を then に寄せる
     t = re.sub(r"\band then\b", " then ", t)
-    # 区切り記号化
-    t = re.sub(r"\bthen\b", " | ", t)
-    # ただし "and" は雑なので、最後に軽く
-    t = re.sub(r"\band\b", " | ", t)
-    parts = [p.strip() for p in t.split("|")]
-    parts = [p for p in parts if p]
+    # then で区切る
+    parts = [p.strip() for p in re.split(r"\bthen\b", t) if p.strip()]
     return parts
 
 
