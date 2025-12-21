@@ -108,7 +108,7 @@ rostopic echo /gpsr/intent
 ```
 文字化けしないバージョン
 ```
-rosrun hsr_audio_pipeline gpsr__echo.py
+rosrun hsr_audio_pipeline gpsr__intent_echo.py
 ```
 
 
