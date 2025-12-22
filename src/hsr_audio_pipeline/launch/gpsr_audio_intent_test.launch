@@ -1,142 +1,81 @@
 <launch>
-   <arg name="vocab_dir" default="/data/vocab"/>
-  <arg name="names_md" default="$(arg vocab_dir)/names.md"/>
-  <arg name="rooms_md" default="$(arg vocab_dir)/room_names.md"/>
-  <arg name="locations_md" default="$(arg vocab_dir)/location_names.md"/>
-  <arg name="objects_md" default="$(arg vocab_dir)/objects.md"/>
-  <arg name="test_objects_md" default="$(arg vocab_dir)/test_objects.md"/>
+  <!-- gpsr_audio_intent_test.launch (UPDATED)
+       Single-source GPSR pipeline using gpsr_parser_node only.
+       Legacy NLU nodes are intentionally NOT launched.
+  -->
 
-  <arg name="vocab_yaml" default="/data/vocab/vocab.yaml"/>
-  <arg name="corrections_yaml" default="/data/vocab/corrections.yaml"/>
-
-  <!-- =======================
-       audio_capture
-       ======================= -->
-  <node pkg="audio_capture" type="audio_capture" name="audio_capture" ns="audio" output="screen">
-    <param name="sample_rate" value="16000" />
-    <param name="channels" value="1" />
-    <param name="format" value="wave" />
-    <param name="sample_format" value="S16LE" />
-    <param name="device" value="" />
+  <!-- ===== Audio ===== -->
+  <node pkg="audio_capture" type="audio_capture" name="audio_capture" output="screen">
+    <param name="sample_rate" value="16000"/>
+    <param name="channels" value="1"/>
+    <param name="sample_format" value="S16LE"/>
+    <param name="format" value="wave"/>
   </node>
 
-  <!-- 任意: RMS monitor 
-  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
-    <param name="topic" value="/audio/audio" />
-    <param name="sample_format" value="S16LE" />
-    <param name="log_interval" value="50" />
+  <!-- ===== Optional monitors ===== -->
+  <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen" />
+
+  <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad" output="screen">
+    <param name="audio_topic" value="/audio/audio"/>
+    <param name="vad_topic" value="/vad/is_speech"/>
+    <param name="sample_rate" value="16000"/>
+    <param name="chunk_size" value="512"/>
+    <param name="speech_threshold" value="0.6"/>
+    <param name="silence_threshold" value="0.3"/>
+    <param name="hangover_ms" value="400"/>
+    <param name="torch_home" value="/data/models/torch"/>
+    <param name="torch_hub_dir" value="/data/models/torch/hub"/>
   </node>
--->
 
-  <!-- =======================
-       Silero VAD
-       ======================= -->
-<node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad" output="screen">
-  <param name="audio_topic" value="/audio/audio" />
-  <param name="vad_topic"   value="/vad/is_speech" />
-  <param name="sample_rate" value="16000" />
-  <param name="chunk_size" value="512" />
-
-  <param name="speech_threshold"  value="0.6" />
-  <param name="silence_threshold" value="0.3" />
-  <param name="hangover_ms"       value="400" />
-
-  <!-- 永続化 -->
-  <param name="torch_home" value="/data/models/torch" />
-  <param name="torch_hub_dir" value="/data/models/torch/hub" />
-</node>
-
-  <!-- =======================
-       Faster-Whisper ASR
-       ======================= -->
+  <!-- ===== ASR ===== -->
   <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py"
         name="faster_whisper_asr_node" output="screen">
-    <param name="model_cache_dir" value="$(env HOME)/.cache/hf" />
-    <param name="torch_cache_dir" value="$(env HOME)/.cache/torch" />
-    <param name="audio_topic" value="/audio/audio" />
-    <param name="vad_topic"   value="/vad/is_speech" />
-    <param name="sample_rate" value="16000" />
-    <param name="sample_width" value="2" />
-    <param name="channels" value="1" />
-　　<param name="raw_text_topic" value="/gpsr/asr/raw_text" />
+    <param name="audio_topic" value="/audio/audio"/>
+    <param name="vad_topic" value="/vad/is_speech"/>
+    <param name="text_topic" value="/gpsr/asr/text"/>
+    <param name="confidence_topic" value="/gpsr/asr/confidence"/>
+    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end"/>
+
+    <param name="language" value="en"/>
+    <param name="model_size" value="small"/>
+    <param name="device" value="cpu"/>
+    <param name="compute_type" value="float32"/>
+
+    <param name="sample_rate" value="16000"/>
+    <param name="channels" value="1"/>
+
+    <param name="vocab_dir" value="/data/vocab"/>
+    <param name="vocab_yaml" value="/data/vocab/vocab.yaml"/>
+    <param name="corrections_yaml" value="/data/vocab/corrections.yaml"/>
+    <param name="names_md" value="/data/vocab/names.md"/>
+    <param name="rooms_md" value="/data/vocab/room_names.md"/>
+    <param name="locations_md" value="/data/vocab/location_names.md"/>
+    <param name="objects_md" value="/data/vocab/objects.md"/>
+    <param name="test_objects_md" value="/data/vocab/test_objects.md"/>
 
     <param name="model_cache_dir" value="/data/models/hf"/>
-    <param name="torch_home"      value="/data/models/torch"/>
-　　<!-- 任意：ローカルに置いたモデルを使うなら -->
-　　<!-- <param name="model_path" value="/data/models/whisper/small"/> -->
-
-    <!-- GPSR ASR outputs（※差し替え版のparam名に合わせる） -->
-    <param name="text_topic"          value="/gpsr/asr/text" />
-    <param name="confidence_topic"    value="/gpsr/asr/confidence" />
-    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
-
-    <!-- 永続: whisper/hf cache + torch -->
-    <param name="model_cache_dir" value="/data/models/hf" />
-    <param name="torch_home"      value="/data/models/torch" />
-
-    <!-- NEW: vocab -->
-    <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
-    <param name="corrections_yaml" value="$(arg corrections_yaml)"/>
-    <param name="use_hotwords" value="true"/>
-
-    <param name="vocab_dir" value="$(arg vocab_dir)"/>
-    <param name="names_md" value="$(arg names_md)"/>
-    <param name="rooms_md" value="$(arg rooms_md)"/>
-    <param name="locations_md" value="$(arg locations_md)"/>
-    <param name="objects_md" value="$(arg objects_md)"/>
-    <param name="test_objects_md" value="$(arg test_objects_md)"/>
-
-    <!-- Model -->
-    <param name="model_size" value="small" />
-    <param name="device" value="cpu" />           <!-- GPUなら cuda -->
-    <param name="compute_type" value="float32" /> <!-- GPUなら float16 推奨 -->
-    <param name="language" value="en" />
-
-    <!-- Segmentation（※差し替え版のparam名に合わせる） -->
-    <param name="pre_roll" value="0.25" />
-    <param name="post_roll" value="0.35" />
-    <param name="min_segment_sec" value="0.6" />
-    <param name="max_segment_sec" value="18.0" />
+    <param name="torch_home" value="/data/models/torch"/>
   </node>
 
-  <!-- =======================
-       GPSR Parser
-       ======================= -->
+  <!-- ===== GPSR Parser (ONLY source of /gpsr/intent) ===== -->
   <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py"
         name="gpsr_parser_node" output="screen">
-    <param name="text_topic"          value="/gpsr/asr/text" />
-    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end" />
-    <param name="confidence_topic"    value="/gpsr/asr/confidence" />
+    <param name="text_topic" value="/gpsr/asr/text"/>
+    <param name="confidence_topic" value="/gpsr/asr/confidence"/>
+    <param name="utterance_end_topic" value="/gpsr/asr/utterance_end"/>
+    <param name="intent_topic" value="/gpsr/intent"/>
 
-    <!-- NEW: vocab -->
-    <param name="vocab_yaml" value="$(arg vocab_yaml)"/>
+    <param name="vocab_dir" value="/data/vocab"/>
+    <param name="vocab_yaml" value="/data/vocab/vocab.yaml"/>
+    <param name="names_md" value="/data/vocab/names.md"/>
+    <param name="rooms_md" value="/data/vocab/room_names.md"/>
+    <param name="locations_md" value="/data/vocab/location_names.md"/>
+    <param name="objects_md" value="/data/vocab/objects.md"/>
+    <param name="test_objects_md" value="/data/vocab/test_objects.md"/>
 
-    <param name="vocab_dir" value="$(arg vocab_dir)"/>
-    <param name="names_md" value="$(arg names_md)"/>
-    <param name="rooms_md" value="$(arg rooms_md)"/>
-    <param name="locations_md" value="$(arg locations_md)"/>
-    <param name="objects_md" value="$(arg objects_md)"/>
-    <param name="test_objects_md" value="$(arg test_objects_md)"/>
-
-    <!-- Unified intent output -->
-    <param name="intent_topic" value="/gpsr/intent" />
-
-    <param name="max_text_age_sec" value="30.0" />
-    <param name="min_confidence" value="-1.0" />
-    <param name="debounce_same_text_sec" value="1.5" />
+    <param name="max_text_age_sec" value="30.0"/>
+    <param name="min_confidence" value="-1.0"/>
+    <param name="debounce_same_text_sec" value="1.5"/>
   </node>
 
-  <!-- =======================
-       Optional backup intent extractor
-       ======================= -->
-  <arg name="start_intent_backup" default="false" />
-  <group if="$(arg start_intent_backup)">
-    <node pkg="hsr_audio_pipeline" type="gpsr_intent_node.py"
-          name="gpsr_intent_node_backup" output="screen">
-      <param name="text_topic" value="/gpsr/asr/text" />
-      <param name="confidence_topic" value="/gpsr/asr/confidence" />
-      <param name="intent_topic" value="/gpsr/intent_alt" />
-      <param name="confirm_threshold" value="-1.0" />
-    </node>
-  </group>
 </launch>
