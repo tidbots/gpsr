@@ -612,6 +612,28 @@ class GpsrParserNode:
         if payload["slots"].get("object_category") is None and state.get("object_category"):
             payload["slots"]["object_category"] = state["object_category"]
 
+        # propagate object/category into step args when missing (helps SMACH executor)
+        obj = payload["slots"].get("object")
+        cat = payload["slots"].get("object_category")
+        if obj is not None or cat is not None:
+            for st in payload.get("steps", []):
+                act = st.get("action")
+                args = st.get("args") or {}
+                if "object_or_category" not in args and "object" not in args and "object_category" not in args:
+                    if act in (
+                        "bring_object_to_operator",
+                        "take_object",
+                        "place_object_on_place",
+                        "deliver_object_to_person_in_room",
+                        "give_object_to_person",
+                        "bring_object_to_person",
+                    ):
+                        if obj is not None:
+                            args["object"] = obj
+                        if cat is not None:
+                            args["object_category"] = cat
+                st["args"] = args
+
         # stringify place-like fields
         for k in ["source_place", "destination_place"]:
             payload["slots"][k] = _place_to_name(payload["slots"].get(k))
