@@ -100,11 +100,11 @@ rosrun hsr_audio_pipeline asr_plain_echo.py
 cd ~/gpsr
 export PULSE_SERVER=unix:/run/user/1000/pulse/native
 docker compose exec noetic-audio bash
-rostopic echo /gpsr/intent
+rostopic echo  /gpsr/intent_json
 ```
 文字化けしないバージョン
 ```
-rosrun hsr_audio_pipeline gpsr__intent_echo.py
+rosrun hsr_audio_pipeline gpsr_intent_echo.py
 ```
 
 
@@ -153,9 +153,13 @@ utterace_end=Trueのたびに
 rostopic pub /asr/text std_msgs/String \
 "data: 'Find a sponge in the living room then get it and bring it to me'" -1
 ```
+
 別のターミナルで
+gpsr_parser_node は utterance_end がトリガなので、テスト時はセットで叩く：
 ```
-rostopic echo /gpsr/intent
+rostopic pub -1 /gpsr/asr/text std_msgs/String "data: '...'"
+rostopic pub -1 /gpsr/asr/utterance_end std_msgs/Bool "data: true"
+rostopic echo -n 1 /gpsr/intent_json
 ```
 
 シンプル ASR 動作確認
