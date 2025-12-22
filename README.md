@@ -131,7 +131,8 @@ Tell me how many food there are on the sink
 
 ## 結果
 ```
-$ rostopic pub /gpsr/asr/text std_msgs/String "data: 'Find a sponge in the living room then get it and bring it to me'" -1
+$ rostopic pub /gpsr/asr/text std_msgs/String "data: 'Find a cleaning supply in the bedroom then get it and put it on the refrigerator'" -1
+$ rostopic pub -1 /gpsr/asr/utterance_end std_msgs/Bool "data: true"
 ```
 
 ```
@@ -142,37 +143,38 @@ data:
 	"ok": true,
 	"need_confirm": false,
 	"intent_type": "composite",
-	"raw_text": "Find a sponge in the living room then get it and bring it to me",
-	"normalized_text": "find a sponge in the living room then get it and bring it to me",
+	"raw_text": "Find a cleaning supply in the bedroom then get it and put it on the refrigerator",
+	"normalized_text": "find a cleaning supply in the bedroom then get it and put it on the refrigerator",
 	"confidence": null,
 	"source": "parser",
-	"command_kind": "bringMeObjFromPlcmt",
-	"slots":
+	"command_kind": "placeObjOnPlcmt",
+	"slots\":
 	 {
 		"object": null,
-		"object_category": null,
+		"object_category": "cleaning supply",
 		"quantity": null,
-		"source_room": "living room",
-		"source_place":null,
-	 	"destination_room": null,
-		"destination_place": null,
+		"source_room": "bedroom",
+		"source_place": null,
+		"destination_room": null,
+		"destination_place": "refrigerator",
 		"person": null,
-     	"person_at_source": null,
+		"person_at_source": null,
 		"person_at_destination": null,
 		"question_type": null,
-	 	"attribute": null,
+		"attribute": null,
 		"comparison": null,
 		"gesture": null,
 		"pose": null,
-	 	"info_type": null,
+		"info_type": null,
 		"info_text": null
-	 },
+	},
 	"steps": [
-		{"action": "find_object_in_room", "args": {"room": "living room"}}, {"action": "take_object", "args": {}},
-		{"action": "bring_object_to_operator", "args": {}}
-	],
-	"extras":
-	{"legacy_slots": {}}, "context": {"lang": "en", "source": "parser"}
+		{"action": "find_object_in_room","args": {"room": "bedroom"}},
+		{"action": "take_object", "args": {}},
+		{"action": "place_object_on_place", "args": {"place": "refrigerator"}}
+		],
+	"extras": {"legacy_slots": {}},
+	"context": {"lang": "en", "source" : "parser"}
 }
 ```
 
