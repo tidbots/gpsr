@@ -83,4 +83,45 @@ VADがTrueのままで post_roll が機能しない場合があるので、max�
 - self._in_speech = False 相当の処理
 - self._pending_finalize = True を確実に立てる
 
-  
+
+## Silero VAD側を「絶対に切れる」方向に固定する“競技用プリセット”
+部屋ノイズ＝PCファン/エアコン/反響あり
+
+### Preset S（Stable / 必ず区切る）
+- speech_threshold: 0.55
+- silence_threshold: 0.35
+- hangover_ms: 200
+- chunk_size: 512（そのまま）
+
+狙い：
+- speech判定は取りこぼしにくく（0.6→0.55）
+- silenceは少し強め（0.3→0.35）で 切りやすく
+- hangover短め（400→200）で 確実に終端が来る
+
+### Preset C（Cut / とにかく切る）
+- speech_threshold: 0.58
+- silence_threshold: 0.40
+- hangover_ms: 120
+
+### Preset H（Hold / ちょい粘る）
+「細切れになる」場合（True/Falseがチカチカ）
+- speech_threshold: 0.52
+- silence_threshold: 0.32
+- hangover_ms: 350
+
+### 競技の際の手順
+1. まず Preset S で固定
+2. /vad/is_speech を見ながら 10回喋る
+```
+rostopic echo /vad/is_speech
+```
+3. 症状で分岐
+- 切れない（Trueが長い） → Preset Cへ
+- 細切れ（Falseが頻繁） → Preset Hへ
+
+### ChatGPTに聞く
+もし「あなたの部屋」で最適化を一発で決めたいなら、次の出力を貼ってください（10秒だけでOK）：
+```
+rostopic echo -n 200 /vad/is_speech
+```
+これで「切れない型 / 細切れ型」を判定して、Preset をS/C/Hのどれに固定すべきかこちらで断定します。
