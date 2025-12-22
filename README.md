@@ -180,6 +180,89 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 ```
 
 
+## ファイル構成
+```
+/Users/roboworks/gpsr
+├─ compose.yaml
+├─ Dockerfile
+├─ LICENSE
+├─ README.md
+├─ README_コマンド.md
+├─ RuleBook.md
+├─ UPDATE.md
+├─ doc.md
+├─ ERROR_CORRECTIONS.md
+├─ command.txt # コマンドジェネレータで生成したコマンド
+│
+├─ gpsr_data/                               # Docker volume 永続化領域
+│  ├─ logs/
+│  │  └─ gpsr/
+│  │     └─ dummy
+│  ├─ models/
+│  │  ├─ hf/
+│  │  │  └─ dummy
+│  │  └─ torch/
+│  │     └─ dummy
+│  └─ vocab/                                # ★ ASR補正 + 語彙（永続化の核）
+│     ├─ vocab.yaml
+│     ├─ corrections.yaml
+│     ├─ names.md
+│     ├─ room_names.md
+│     ├─ location_names.md
+│     ├─ objects.md
+│     └─ test_objects.md
+│
+└─ src/
+   └─ hsr_audio_pipeline/                   # ROS1 Noetic package
+      ├─ package.xml
+      ├─ CMakeLists.txt
+      │
+      ├─ launch/
+      │  ├─ audio_pipeline.launch
+      │  ├─ audio_test.launch
+      │  ├─ audio_vad_test.launch
+      │  ├─ audio_asr_simple_test.launch
+      │  ├─ audio_vad_asr_test.launch
+      │  ├─ gpsr_audio_intent_test.launch
+      │  ├─ gpsr_audio_intent_test_updated.launch
+      │  ├─ gpsr_parser_node_updated.launch
+      │  ├─ gpsr_run.launch
+      │  └─ gpsr_smach_test.launch
+      │
+      ├─ scripts/
+      │  ├─ faster_whisper_asr_node.py
+      │  ├─ silero_vad_node.py
+      │  ├─ audio_rms_monitor.py
+      │  ├─ asr_plain_echo.py
+      │  ├─ gpsr_asr_logger.py
+      │  ├─ gpsr_intent_echo.py
+      │  ├─ gpsr_intent_node.py
+      │  ├─ gpsr_smach_node.py
+      │  ├─ gpsr_vocab.py
+      │  ├─ gpsr_parser.py                  # ★ 100% パーサ本体
+      │  ├─ gpsr_parser.py-bk
+      │  ├─ gpsr_parser_node.py             # ★ パーサROSノード（本命）
+      │  └─ gpsr_parser_node2.py
+      │
+      └─ tools/
+         ├─ gpsr_eval.py
+         ├─ make_vocab_yaml.py
+         ├─ command.txt
+         ├─ jsonl_to_corrections.py
+         ├─ aaa/                            # eval 出力（タイムスタンプ別）
+         │  ├─ 20251222-084603/
+         │  │  ├─ results.jsonl
+         │  │  ├─ failures.txt
+         │  │  ├─ summary.md
+         │  │  └─ corrections_suggested.yaml
+         │  ├─ 20251222-092011/
+         │  └─ ...
+         └─ aaa                              # (他の補助物がある場合)
+
+```
+
+
+
 ## 全体アーキテクチャ
 ```
 audio_capture
