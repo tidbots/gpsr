@@ -806,3 +806,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+            if action == "bring_object_to_operator":
+                # Typical args: {source_place: "..."} (and/or source_room) plus optional object/object_category
+                sp = args.get("source_place") or args.get("place")
+                if sp and not slots.get("source_place"):
+                    slots["source_place"] = sp
+                sr = args.get("source_room") or args.get("room")
+                if sr and not slots.get("source_room"):
+                    slots["source_room"] = sr
