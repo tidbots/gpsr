@@ -200,7 +200,10 @@ rostopic pub /asr/text std_msgs/String \
 別のターミナルで
 gpsr_parser_node は utterance_end がトリガなので、テスト時はセットで叩く：
 ```
-rostopic pub -1 /gpsr/asr/text std_msgs/String "data: '...'"
+ostopic pub -1 /gpsr/asr/text std_msgs/String "data: 'Navigate to the desk lamp then look for a tuna and grasp it and give it to the lying person in the bathroom'"
+```
+別のターミナルで
+```
 rostopic pub -1 /gpsr/asr/utterance_end std_msgs/Bool "data: true"
 rostopic echo -n 1 /gpsr/intent_json
 ```
