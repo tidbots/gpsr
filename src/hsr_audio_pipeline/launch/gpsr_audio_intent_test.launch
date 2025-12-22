@@ -148,4 +148,16 @@
     <param name="debounce_same_text_sec"  value="1.5"/>
   </node>
 
+<node pkg="hsr_audio_pipeline" type="gpsr_smach_node.py" name="gpsr_smach_node" output="screen">
+  <param name="intent_topic" value="/gpsr/intent_json"/>
+  <param name="status_topic" value="/gpsr/task/status"/>
+  <param name="event_topic" value="/gpsr/task/event"/>
+  <param name="auto_run" value="true"/>
+  <param name="drop_if_busy" value="true"/>
+  <param name="step_timeout" value="5.0"/>
+  <param name="require_ok" value="true"/>
+  <param name="require_no_confirm" value="true"/>
+  <param name="introspection" value="false"/>
+</node>
+
 </launch>
