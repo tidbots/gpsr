@@ -274,6 +274,7 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 ### Audio / ASR 系
 1. audio_capture ノード（既存）
 - 役割
+  
 マイク入力を ROS トピック /audio/audio に配信
 
 - 出力
