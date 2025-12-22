@@ -1,5 +1,12 @@
-# gpsr_projector.py
-# GPSR template projection engine
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+gpsr_projector.py
+Project free-form ASR text onto a finite list of *official* GPSR commands.
+
+- Recommended candidates: official command generator output (one command per line)
+- Also supports templates containing {slots} (optional)
+"""
 
 import re
 from dataclasses import dataclass
@@ -10,7 +17,7 @@ def _norm(s: str) -> str:
     s = (s or "").lower().strip()
     s = s.replace("’", "'").replace("`", "'")
     s = re.sub(r"[^a-z0-9\s']", " ", s)
-    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
@@ -57,23 +64,28 @@ class ProjectionResult:
 
 
 class GpsrProjector:
-    def __init__(self, templates: List[str], vocab: Dict[str, List[str]]):
-        self.templates = templates
-        self.vocab = vocab
+    """
+    If candidates are concrete commands (no {...}), it's nearest-neighbor over command list.
+    If candidates contain slots, tries to fill them using vocab-based slot extraction.
+    """
 
-        self.names = sorted(vocab.get("names", []), key=len, reverse=True)
-        self.locations = sorted(vocab.get("locations", []), key=len, reverse=True)
-        self.objects = sorted(vocab.get("objects", []), key=len, reverse=True)
-        self.categories = sorted(vocab.get("object_categories", []), key=len, reverse=True)
+    def __init__(self, candidates: List[str], vocab: Optional[Dict[str, List[str]]] = None):
+        self.candidates = [c.strip() for c in (candidates or []) if c and c.strip()]
+        self.vocab = vocab or {}
 
-    # --------------------
+        self.names = sorted(self.vocab.get("names", []), key=len, reverse=True)
+        self.locations = sorted(self.vocab.get("locations", []), key=len, reverse=True)
+        self.objects = sorted(self.vocab.get("objects", []), key=len, reverse=True)
+        self.categories = sorted(self.vocab.get("object_categories", []), key=len, reverse=True)
+
     def extract_slots(self, text: str) -> Dict[str, str]:
         t = _norm(text)
         slots: Dict[str, str] = {}
 
         def find(cands):
             for c in cands:
-                if _norm(c) in t:
+                cn = _norm(c)
+                if cn and cn in t:
                     return c
             return None
 
@@ -88,19 +100,20 @@ class GpsrProjector:
 
         return slots
 
-    # --------------------
-    def fill(self, template: str, slots: Dict[str, str]) -> Optional[str]:
-        needed = re.findall(r"\{([a-z_]+)\}", template)
+    def _fill_if_needed(self, cand: str, slots: Dict[str, str]) -> Optional[str]:
+        if "{" not in cand:  # concrete command
+            return cand
+
+        needed = re.findall(r"\{([a-z_]+)\}", cand)
         for k in needed:
             if k not in slots:
                 return None
 
-        out = template
+        out = cand
         for k, v in slots.items():
             out = out.replace("{" + k + "}", v)
         return out
 
-    # --------------------
     def score(self, hyp: str, cand: str) -> float:
         j = _jaccard(hyp, cand)
         d = _levenshtein(hyp, cand)
@@ -108,22 +121,19 @@ class GpsrProjector:
         ed = 1.0 - d / L
         return 0.65 * j + 0.35 * ed
 
-    # --------------------
     def project(self, hyp: str) -> Optional[ProjectionResult]:
-        slots = self.extract_slots(hyp)
-        best = None
+        if not self.candidates:
+            return None
 
-        for tpl in self.templates:
-            filled = self.fill(tpl, slots)
+        slots = self.extract_slots(hyp)
+        best: Optional[ProjectionResult] = None
+
+        for c in self.candidates:
+            filled = self._fill_if_needed(c, slots)
             if not filled:
                 continue
-
             s = self.score(hyp, filled)
             if best is None or s > best.score:
-                best = ProjectionResult(
-                    projected_text=filled,
-                    template=tpl,
-                    score=s,
-                    slots=slots,
-                )
+                best = ProjectionResult(projected_text=filled, template=c, score=s, slots=slots)
+
         return best
