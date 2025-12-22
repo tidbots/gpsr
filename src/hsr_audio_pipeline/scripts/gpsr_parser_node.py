@@ -681,7 +681,7 @@ class GpsrParserNode:
                         set_if_empty("pose", mpose.group(1))
                         set_if_empty("person_at_destination", f"{mpose.group(1)} person")
 
-if action == "count_persons_in_room":
+            if action == "count_persons_in_room":
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural") or args.get("person_filter"))
