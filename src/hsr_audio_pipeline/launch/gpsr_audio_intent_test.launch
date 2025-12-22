@@ -158,6 +158,9 @@
   <param name="require_ok" value="true"/>
   <param name="require_no_confirm" value="true"/>
   <param name="introspection" value="false"/>
+  <param name="queue_size" value="10"/>
+  <param name="coalesce_same_text_sec" value="1.0"/>
+  <param name="max_queue_wait_sec" value="120.0"/>
 </node>
 
 </launch>
