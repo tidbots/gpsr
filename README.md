@@ -203,8 +203,8 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 │  │  │  └─ dummy
 │  │  └─ torch/
 │  │     └─ dummy
-│  └─ vocab/                                # ★ ASR補正 + 語彙（永続化の核）
-│     ├─ vocab.yaml
+│  └─ vocab/ # ★ ASR補正 + 語彙（永続化の核）
+│     ├─ vocab.yaml          # vocab.yaml is optional and can be generated from individual vocabulary files.
 │     ├─ corrections.yaml
 │     ├─ names.md
 │     ├─ room_names.md
