@@ -63,7 +63,7 @@
     <param name="text_topic" value="/gpsr/asr/text"/>
     <param name="confidence_topic" value="/gpsr/asr/confidence"/>
     <param name="utterance_end_topic" value="/gpsr/asr/utterance_end"/>
-    <param name="intent_topic" value="/gpsr/intent"/>
+    <param name="intent_topic" value="/gpsr/intent_json"/>
 
     <param name="vocab_dir" value="/data/vocab"/>
     <param name="vocab_yaml" value="/data/vocab/vocab.yaml"/>
