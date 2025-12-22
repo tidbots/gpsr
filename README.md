@@ -130,8 +130,51 @@ Tell me how many food there are on the sink
 ```
 
 ## 結果
-「テーブルの上のペットボトルを持ってきて」 と
+```
+$ rostopic pub /gpsr/asr/text std_msgs/String "data: 'Find a sponge in the living room then get it and bring it to me'" -1
+```
 
+```
+$ rostopic echo -n 1 /gpsr/intent_json
+data:
+{
+	"schema": "gpsr_intent_v1",
+	"ok": true,
+	"need_confirm": false,
+	"intent_type": "composite",
+	"raw_text": "Find a sponge in the living room then get it and bring it to me",
+	"normalized_text": "find a sponge in the living room then get it and bring it to me",
+	"confidence": null,
+	"source": "parser",
+	"command_kind": "bringMeObjFromPlcmt",
+	"slots":
+	 {
+		"object": null,
+		"object_category": null,
+		"quantity": null,
+		"source_room": "living room",
+		"source_place":null,
+	 	"destination_room": null,
+		"destination_place": null,
+		"person": null,
+     	"person_at_source": null,
+		"person_at_destination": null,
+		"question_type": null,
+	 	"attribute": null,
+		"comparison": null,
+		"gesture": null,
+		"pose": null,
+	 	"info_type": null,
+		"info_text": null
+	 },
+	"steps": [
+		{"action": "find_object_in_room", "args": {"room": "living room"}}, {"action": "take_object", "args": {}},
+		{"action": "bring_object_to_operator", "args": {}}
+	],
+	"extras":
+	{"legacy_slots": {}}, "context": {"lang": "en", "source": "parser"}
+}
+```
 
 
 ## 誤認識ログを使って品質を改良する
