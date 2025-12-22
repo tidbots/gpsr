@@ -284,25 +284,24 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 2. audio_rms_monitor / silero_vad_node（任意）
 audio_rms_monitor
 - 役割
-RMS / PEAK をログ出力
+  - RMS / PEAK をログ出力
+  - 入力音量・マイク設定のデバッグ用
+- 本番必須ではない
 
-- 入力音量・マイク設定のデバッグ用
-  - 本番必須ではない
-  - silero_vad_node（任意）
-
+silero_vad_node（任意）
 - 入力
-/audio/audio
+  - /audio/audio
 
 - 出力
-/vad/segments
+  - /vad/segments
 
 - 役割
   - 発話区間（speech / non-speech）の検出
   - Whisper に渡す音声区間のトリガ
 
 - 設計方針
- - 静かな環境では 無効化しても可
- - ノイズ環境・長時間運用では有効
+  - 静かな環境では 無効化しても可
+  - ノイズ環境・長時間運用では有効
 
 3. faster_whisper_asr_node
 - 入力
@@ -341,8 +340,7 @@ RMS / PEAK をログ出力
   - gpsr_vocab.py（語彙・補正管理）
 
 ⚠️ 重要
-ここで intent + steps が完全に確定
-下流は自然言語を一切扱わない
+ここで intent + steps が完全に確定し，下流は自然言語を一切扱わない
 
 ### SMACH ベースのタスク制御
 5. gpsr_smach_node
@@ -360,7 +358,7 @@ RMS / PEAK をログ出力
   - GPSR タスク全体の状態遷移管理
 
 - 典型フロー
-
+```
 WAIT
  → LISTEN
  → PARSE
@@ -371,13 +369,11 @@ WAIT
  → DELIVER
  → REPORT
  → WAIT
+```
 
-
-特徴
-
-intent / steps に従って deterministic に遷移
-
-失敗時は聞き返し・再探索へ分岐可能
+- 特徴
+  - intent / steps に従って deterministic に遷移
+  - 失敗時は聞き返し・再探索へ分岐可能
 
 ### ナビゲーション系
 6. hsr_nav_client_node
@@ -405,74 +401,34 @@ intent / steps に従って deterministic に遷移
 - 役割
   - 抽象コマンドを HSR の低レベル操作に分解
 
-内部で利用
-
-視線制御
-
-物体検出
-
-把持
-
-音声合成 など
+- 内部で利用
+  - 視線制御
+  - 物体検出
+  - 把持
+  - 音声合成 など
 
 ### Bringup / Launch 構成
 8. bringup launch（想定）
 
-gpsr_system.launch
+- gpsr_system.launch
+  - audio_capture
+  - (audio_rms_monitor)
+  - (silero_vad_node)
+  - faster_whisper_asr_node
+  - gpsr_parser_node
+  - gpsr_smach_node
+  - hsr_nav_client_node
+  - hsr_task_executor_node
+- gpsr_debug.launch
+  - ASR + Parser のみ
+  - Parser 単体
+  - 評価・デバッグ用
 
-audio_capture
-
-(audio_rms_monitor)
-
-(silero_vad_node)
-
-faster_whisper_asr_node
-
-gpsr_parser_node
-
-gpsr_smach_node
-
-hsr_nav_client_node
-
-hsr_task_executor_node
-
-gpsr_debug.launch
-
-ASR + Parser のみ
-
-Parser 単体
-
-評価・デバッグ用
-
-設計思想（アップデート要点）
-
-音声認識は自由、理解は厳密
-
-NLP は parser で完結
-
-SMACH 以降は自然言語を見ない
-
-Vision / Nav / Manipulation と完全分離
-
-RoboCup 本番・研究・教材すべてに耐える構造
-
-もし次に進むならおすすめは：
-
-この内容を README に反映
-
-Mermaid / 図解版アーキテクチャ
-
-gpsr_system.launch（完全 bringup）作成
-
-論文用「Failure-driven GPSR parsing architecture」章
-
-どこまでやりますか？
-
-
-
-
-
-
+### 設計思想（アップデート要点）
+- 音声認識は自由、理解は厳密
+- NLP は parser で完結
+- SMACH 以降は自然言語を見ない
+- Vision / Nav / Manipulation と完全分離
 
 
 
