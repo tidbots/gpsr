@@ -604,6 +604,8 @@ class GpsrParserNode:
 
         self._fill_slots_from_steps(payload)
 
+        self._refine_command_kind_and_slots(payload)
+
         # reflect last object/category into slots if still empty
         if payload["slots"].get("object") is None and state.get("object"):
             payload["slots"]["object"] = state["object"]
@@ -640,59 +642,46 @@ class GpsrParserNode:
             args = st.get("args", {}) or {}
 
             # manipulation/navigation
+            if action == "go_to_location":
+                # navigation to symbolic place/location
+                if args.get("location"):
+                    set_if_empty("destination_place", args.get("location"))
+                if args.get("room"):
+                    set_if_empty("destination_room", args.get("room"))
+
             if action == "find_object_in_room":
                 set_if_empty("source_room", args.get("room"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
-
-            if action in ("take_object", "take_object_from_place"):
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
-                set_if_empty("source_place", args.get("place") or args.get("source_place") or args.get("from_place"))
-
-            if action == "place_object_on_place":
-                set_if_empty("destination_place", args.get("place") or args.get("to_place"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
-
-            if action == "bring_object_to_operator":
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+                # parser may use either object/object_category OR object_or_category (unified earlier)
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
                 set_if_empty("source_place", args.get("source_place") or args.get("place"))
 
+            if action in ("take_object", "take_object_from_place"):
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
+                set_if_empty("source_place", args.get("place") or args.get("from_place") or args.get("source_place"))
+
             if action == "deliver_object_to_person_in_room":
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+                # give / deliver to a person in a room (possibly pose-based)
                 set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
+                if args.get("name"):
+                    set_if_empty("person", args.get("name"))
+                    set_if_empty("person_at_destination", args.get("name"))
+                # person_filter examples: "lying person", "person sitting", "tall person"
+                pf = args.get("person_filter") or args.get("person_filter_singular") or args.get("person_filter_plural")
+                if pf:
+                    set_if_empty("attribute", pf)
+                    # extract pose if present
+                    mpose = re.search(r"\b(lying|sitting|standing)\b", str(pf))
+                    if mpose:
+                        set_if_empty("pose", mpose.group(1))
+                        set_if_empty("person_at_destination", f"{mpose.group(1)} person")
 
-            if action == "go_to_location":
-                set_if_empty("destination_place", args.get("location") or args.get("place"))
-
-            # social / follow / guide
-            if action == "meet_person_in_room":
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("name"))
-                set_if_empty("attribute", args.get("person_filter"))
-
-            if action in ("greet_named_person_in_room", "introduce_self_to_named_person_in_room"):
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("name"))
-
-            if action in ("greet_person_in_room", "introduce_self_to_person_in_room"):
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("attribute", args.get("person_filter"))
-
-            if action in ("follow_last_person", "guide_last_person_to_place"):
-                set_if_empty("destination_place", args.get("to_place") or args.get("place") or args.get("location"))
-
-            if action == "guide_named_person_from_place_to_place":
-                set_if_empty("person", args.get("name"))
-                set_if_empty("source_place", args.get("from_place"))
-                set_if_empty("destination_place", args.get("to_place"))
-
-            # Q&A
-            if action == "count_persons_in_room":
+if action == "count_persons_in_room":
                 set_if_empty("source_room", args.get("room"))
                 set_if_empty("question_type", "count_people")
                 set_if_empty("attribute", args.get("person_filter_plural") or args.get("person_filter"))
@@ -735,6 +724,32 @@ class GpsrParserNode:
         slots["source_place"] = _place_to_name(slots.get("source_place"))
         slots["destination_place"] = _place_to_name(slots.get("destination_place"))
 
+
+    def _refine_command_kind_and_slots(self, payload: dict):
+        """
+        Post-process composite patterns so downstream executors can rely on stable command_kind/slots.
+        """
+        steps = payload.get("steps", []) or []
+        actions = [s.get("action") for s in steps if isinstance(s, dict)]
+        # find -> take -> deliver pattern
+        if actions == ["find_object_in_room", "take_object", "deliver_object_to_person_in_room"] or (
+            len(actions) >= 3
+            and actions[0] in ("go_to_location", "find_object_in_room")
+            and "find_object_in_room" in actions
+            and "take_object" in actions
+            and "deliver_object_to_person_in_room" in actions
+        ):
+            payload["intent_type"] = "composite"
+            payload["command_kind"] = "findTakeDeliverObj"
+
+        # pose normalization: if attribute mentions pose but pose slot empty
+        slots = payload.get("slots", {})
+        if slots.get("pose") is None:
+            attr = slots.get("attribute")
+            if attr:
+                mpose = re.search(r"\b(lying|sitting|standing)\b", str(attr))
+                if mpose:
+                    slots["pose"] = mpose.group(1)
 
 def main():
     rospy.init_node("gpsr_parser_node")
