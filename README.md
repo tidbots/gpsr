@@ -6,8 +6,8 @@
 
 ## ToDo
 ### 21 Dec.2025
-Whisperのモデルを起動時に毎回ダウンロードしているので無駄<br>
-Silero VADでtorch.hubでmaster.zipを毎回ダウンロードしている<br>
+~~Whisperのモデルを起動時に毎回ダウンロードしているので無駄<br>~~
+~~Silero VADでtorch.hubでmaster.zipを毎回ダウンロードしている<br>~~
 ->Docker側で/modelを永続化する
 
 ### 20 Dec. 2025
@@ -23,8 +23,6 @@ Silero VADでtorch.hubでmaster.zipを毎回ダウンロードしている<br>
           ├─ correction 辞書生成
           └─ 正規化テキスト出力
 ```
-
-
 
 ### 20 Dec.2025
 **未テスト**
@@ -46,8 +44,6 @@ rostopic echo /gpsr/intent
 rostopic echo /gpsr/task_state
 rostopic echo /gpsr/result
 ```
-
-
 
 ### 20 Dec.2025
 ~~**パラメータ他をハードコーティングしている**~~
@@ -116,7 +112,7 @@ rosrun hsr_audio_pipeline gpsr__intent_echo.py
 命令文はCommandGeneratorで作る<br>
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
-命令のサンプル
+命令のサンプル (command.txt)
 ```
 Tell me how many people in the bathroom are wearing white sweaters
 Tell the gesture of the person at the bedside table to the person at the dishwasher
@@ -134,16 +130,8 @@ Tell me how many food there are on the sink
 ```
 
 ## 結果
-「テーブルの上のペットボトルを持ってきて」 と発話すると、
+「テーブルの上のペットボトルを持ってきて」 と
 
-/asr/text に文字起こしされた日本語文が
-
-/gpsr/intent に JSON 例：
-```
-{"raw_text": "テーブルの上のペットボトルを持ってきて", 
- "intent_type": "bring",
- "slots": {"object": "テーブルの上のペットボトル", "source": "", "destination": "", "person": ""}}
-```
 
 
 ## 誤認識ログを使って品質を改良する
@@ -194,7 +182,7 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 ├─ ERROR_CORRECTIONS.md
 ├─ command.txt # コマンドジェネレータで生成したコマンド
 │
-├─ gpsr_data/                               # Docker volume 永続化領域
+├─ gpsr_data/ # Docker volume 永続化領域
 │  ├─ logs/
 │  │  └─ gpsr/
 │  │     └─ dummy
@@ -261,6 +249,236 @@ roslaunch hsr_audio_pipeline audio_asr_simple_test.launch
 
 ```
 
+## 1. 全体パイプライン
+```
+[Microphone]
+     ↓
+[audio_capture]
+     ↓  /audio/audio
+[ audio_rms_monitor ]   [ silero_vad_node ]（任意）
+        │                   ↓ /vad/segments
+        └──────────────→ [ faster_whisper_asr_node ]
+                                ↓ /asr/text (+ confidence)
+                         [ gpsr_parser_node ]
+                                ↓ /gpsr/intent (JSON)
+                         [ gpsr_smach_node ]
+                                ↓
+          ┌──────── navigation ─────────┐
+          │                               │
+[ hsr_nav_client_node ]     [ hsr_task_executor_node ]
+          │                               │
+     move_base                         HSR操作系
+```
+
+## 2. 各ノードの役割
+### Audio / ASR 系
+1. audio_capture ノード（既存）
+- 役割
+マイク入力を ROS トピック /audio/audio に配信
+
+- 出力
+/audio/audio (audio_common_msgs/AudioData)
+
+- 備考
+  - Docker 環境では ALSA / PulseAudio をホストとブリッジ
+  - サンプリングレート・フォーマットは launch で制御
+
+2. audio_rms_monitor / silero_vad_node（任意）
+audio_rms_monitor
+- 役割
+RMS / PEAK をログ出力
+
+- 入力音量・マイク設定のデバッグ用
+  - 本番必須ではない
+  - silero_vad_node（任意）
+
+- 入力
+/audio/audio
+
+- 出力
+/vad/segments
+
+- 役割
+  - 発話区間（speech / non-speech）の検出
+  - Whisper に渡す音声区間のトリガ
+
+- 設計方針
+ - 静かな環境では 無効化しても可
+ - ノイズ環境・長時間運用では有効
+
+3. faster_whisper_asr_node
+- 入力
+  - /audio/audio
+  - /vad/segments（任意）
+
+- 出力
+  - /asr/text (std_msgs/String)
+  - /asr/confidence（任意）
+  - /asr/partial_text（任意）
+
+- 役割
+  - Whisper（tiny.en など）による 英語ロングセンテンス認識
+  - GPSR 用に連続音声を安定して文字起こし
+
+- 設計ポイント
+  - 文法制約は行わない（自由認識）
+  - 誤認識は後段の corrections / parser で吸収
+
+### GPSR コマンド理解系
+4. gpsr_parser_node（= gpsr_command_parser_node）
+- 入力
+  - /asr/text
+  - /asr/confidence（任意）
+
+- 出力
+  - /gpsr/intent（JSON, schema: gpsr_intent_v1）
+
+- 役割
+  - ASR 出力を GPSR ルールベースで 100% 解析
+  - 正規化・参照解決（it / them / last person）
+  - 不明瞭時は need_confirm=true を付与
+
+- 内部
+  - gpsr_parser.py（100% カバレッジのルールパーサ）
+  - gpsr_vocab.py（語彙・補正管理）
+
+⚠️ 重要
+ここで intent + steps が完全に確定
+下流は自然言語を一切扱わない
+
+### SMACH ベースのタスク制御
+5. gpsr_smach_node
+- 入力
+  - /gpsr/intent
+  - /gpsr/nav_status
+  - /gpsr/exec_status
+
+- 出力
+  - /gpsr/nav_goal
+  - /gpsr/exec_command
+  - /gpsr/state
+
+- 役割
+  - GPSR タスク全体の状態遷移管理
+
+- 典型フロー
+
+WAIT
+ → LISTEN
+ → PARSE
+ → PLAN
+ → MOVE
+ → SEARCH
+ → GRASP
+ → DELIVER
+ → REPORT
+ → WAIT
+
+
+特徴
+
+intent / steps に従って deterministic に遷移
+
+失敗時は聞き返し・再探索へ分岐可能
+
+### ナビゲーション系
+6. hsr_nav_client_node
+- 入力
+  - /gpsr/nav_goal（部屋名・場所名）
+
+- 出力
+  - /gpsr/nav_status
+
+- 内部
+  - move_base アクション
+
+- 役割
+  -  シンボル（kitchen 等）→ map 座標変換
+  -  Nav Stack との I/F を一本化
+
+### HSR 操作系
+7. hsr_task_executor_node
+- 入力
+  - /gpsr/exec_command
+
+- 出力
+  - /gpsr/exec_status
+
+- 役割
+  - 抽象コマンドを HSR の低レベル操作に分解
+
+内部で利用
+
+視線制御
+
+物体検出
+
+把持
+
+音声合成 など
+
+### Bringup / Launch 構成
+8. bringup launch（想定）
+
+gpsr_system.launch
+
+audio_capture
+
+(audio_rms_monitor)
+
+(silero_vad_node)
+
+faster_whisper_asr_node
+
+gpsr_parser_node
+
+gpsr_smach_node
+
+hsr_nav_client_node
+
+hsr_task_executor_node
+
+gpsr_debug.launch
+
+ASR + Parser のみ
+
+Parser 単体
+
+評価・デバッグ用
+
+設計思想（アップデート要点）
+
+音声認識は自由、理解は厳密
+
+NLP は parser で完結
+
+SMACH 以降は自然言語を見ない
+
+Vision / Nav / Manipulation と完全分離
+
+RoboCup 本番・研究・教材すべてに耐える構造
+
+もし次に進むならおすすめは：
+
+この内容を README に反映
+
+Mermaid / 図解版アーキテクチャ
+
+gpsr_system.launch（完全 bringup）作成
+
+論文用「Failure-driven GPSR parsing architecture」章
+
+どこまでやりますか？
+
+
+
+
+
+
+
+
+
+
 
 
 ## 全体アーキテクチャ
@@ -283,352 +501,6 @@ gpsr_parser_node
 gpsr_smach_node
 ```
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│                   Host PC / Docker コンテナ                  │
-│                     (ROS Noetic, hsr_ws)                     │
-└───────────────────────────────────────────────────────────────┘
-
-      [物理マイク / OS のデフォルト録音デバイス]
-                               │
-                               │  ALSA / PulseAudio
-                               ▼
-┌───────────────────────────────────────────────────────────────┐
-│                        Audio 入力レイヤ                       │
-│                                                               │
-│  [audio_capture]  (audio_capture/audio_capture)               │
-│      - 入力:  OS のデフォルト録音デバイス                    │
-│      - 出力: /audio/audio (audio_common_msgs/AudioData)      │
-│              /audio/audio_info (AudioInfo)                    │
-└───────────────────────────────────────────────────────────────┘
-                               │
-                               │ /audio/audio
-                               ▼
-┌───────────────────────────────────────────────────────────────┐
-│                        モニタ・VAD レイヤ                    │
-│                                                               │
-│  [audio_rms_monitor] (hsr_audio_pipeline/audio_rms_monitor.py)│
-│      - 入力: /audio/audio                                     │
-│      - ログ出力: RMS, PEAK                                   │
-│                                                               │
-│  （オプション）[silero_vad_node]                             │
-│      - 入力: /audio/audio                                     │
-│      - 出力: /vad/is_speech (std_msgs/Bool)                  │
-└───────────────────────────────────────────────────────────────┘
-                               │
-                               │ /audio/audio
-                               ▼
-┌───────────────────────────────────────────────────────────────┐
-│                    音声認識 (ASR) レイヤ                     │
-│                                                               │
-│  [faster_whisper_asr_simple_node]                             │
-│      - 入力: /audio/audio (AudioData)                         │
-│      - パラメータ例:                                          │
-│          language=en, model_size=tiny.en, segment_sec=8.0     │
-│      - 出力: /asr/text (std_msgs/String, 英文)                │
-└───────────────────────────────────────────────────────────────┘
-                               │
-                               │ /asr/text
-                               ▼
-┌───────────────────────────────────────────────────────────────┐
-│                  コマンド解釈 (Intent) レイヤ                │
-│                                                               │
-│  [gpsr_intent_node]                                           │
-│      - 入力: /asr/text (英語コマンド文字列)                  │
-│      - 内部:                                                  │
-│          - 正規化（全角→半角、空白整理、誤認識補正）        │
-│          - ルールベースパース                                 │
-│              intent_type: bring / navigate / tell / count…    │
-│              slots: {object, source, destination,             │
-│                      person, room, attribute}                 │
-│      - 出力: /gpsr/intent (std_msgs/String, JSON)            │
-│          例: {"raw_text": "...",                              │
-│                "normalized_text": "...",                      │
-│                "intent_type": "bring",                        │
-│                "slots": {...}}                                │
-└───────────────────────────────────────────────────────────────┘
-                               │
-                               │ /gpsr/intent
-                               ▼
-┌───────────────────────────────────────────────────────────────┐
-│                 タスク実行制御 (SMACH) レイヤ                │
-│                                                               │
-│  [gpsr_smach_node]                                            │
-│      - 入力: /gpsr/intent                                     │
-│      - SMACH state machine:                                   │
-│          WAIT_INTENT → PARSE_INTENT → PLAN_TASK → EXECUTE…    │
-│      - 現状: Intent を受けてプランニング部まで               │
-│               （ナビゲーション・マニピュレーションは今後）   │
-└───────────────────────────────────────────────────────────────┘
 
 ```
-
-1. マイク → audio_capture → /audio/audio
-生の音声ストリームを ROS トピック化。
-
-2. audio_rms_monitor / silero_vad_node
-- RMS/PEAK ログで入力レベルを確認
-- Silero VAD で「しゃべっている区間」を検出（必要に応じて）
-
-3. faster_whisper_asr_simple_node
-- /audio/audio を連続的に読み取り
-- Whisper (tiny.en など) で 英語ロングセンテンス をテキスト化 → /asr/text
-
-4. gpsr_intent_node
-- /asr/text を英語コマンドとして正規化＆パース
-- ルールベースで intent_type と slots を埋めて /gpsr/intent に JSON で出力
-
-5. gpsr_smach_node
-- /gpsr/intent を受けて SMACH の状態遷移
-- **今後、HSR のナビゲーション・物体把持・対話などをここから呼び出す予定**
-
-
-
-
-
-## 1. ROS パッケージ構成
-```
-gpsr/          （メタパッケージ or リポジトリルート）
-├── Dockerfile
-├── compose.yaml
-└── src
-     ├── launch/
-          ├── audio_asr_simple_test.launch
-          ├── audio_pipeline.launch
-          ├── audio_test.launch
-          ├── audio_vad_asr_test.launch
-          ├── audio_vad_test.launch
-          ├── gpsr_audio_intent_test.launch
-          └── gpsr_smach_test.launch
-     ├── scripts/
-          ├── apply_corrections_example.py
-          ├── asr_plain_echo.py
-          ├── audio_rms_monitor.py
-          ├── corrections_candidates.py
-          ├── faster_whisper_asr_node.py
-          ├── faster_whisper_asr_simple_node.py
-          ├── gen_corrections.py
-          ├── gpsr_intent_echo.py
-          ├── gpsr_intent_node.py
-          ├── gpsr_parser.py
-          ├── gpsr_parser_node.py
-          ├── gpsr_smach_node.py
-          ├── gpsr_vocab.py
-          └── silero_vad_node.py
-     ├── CMakeLists.txt
-     └── package.xml
-
-```
-## 2. 各ノードの役割
-### audio 系
-#### 1. audio_capture ノード（既存パッケージ）
-- 役割: マイク入力 → /audio (AudioData) に配信
-- パラメータでサンプリングレート・フォーマットなどを設定
-- Docker コンテナ内の ALSA/PulseAudio とホストをブリッジ
-
-#### 2. silero_vad_node
-- 入力: /audio (audio_common_msgs/AudioData)
-- 出力: /vad/segments（発話区間の開始・終了、VADフラグ 等）
-- 役割:
-  - Silero VAD で「今しゃべっているかどうか」を検出
-  - Whisper に渡す音声区間を切り出すトリガを出す
-  - ノイズの多い環境での余分な音声入力を抑える
-
-#### 3. faster_whisper_asr_node
-- 入力:
-  - /audio（音声ストリーム）
-  - /vad/segments（どの区間を認識するか）
-- 出力:
-  - /asr/text（最終認識結果の文字列）
-  - /asr/partial_text（オプション：部分認識結果）
-  - /asr/confidence（オプション：信頼度）
-  - /asr/result（文字列＋信頼度＋タイムスタンプ等をまとめた構造体）
-- 役割:
-  - VADで決まった区間の音声を Whisper で文字起こし
-  - GPSR用に扱いやすい認識結果をトピックで配信
-
-### GPSR コマンド理解・計画系
-#### 4. gpsr_command_parser_node
-- 入力:
-  - /asr/text or /asr/result
-- 出力:
-  - /gpsr/intent（意図ラベル: “bring_object”, “go_to”, “answer_question” など）
-  - /gpsr/slots（対象物・場所・人などのスロット情報。geometryやID）
-  - /gpsr/plan（オプション: サブタスク列の簡易プラン）
-- 役割:
-  - 認識された文章をルール or ML-based で解析
-  - GPSRルールに沿ったタスク表現（意図＋引数）に変換
-  - 不明瞭なときは「聞き返しフラグ」を出すのも可
-
-### smach ベースのタスク制御系
-#### 5.gpsr_smach_node（hsr_gpsr_smach 内）
-- 入力:
-  - /gpsr/intent, /gpsr/slots, /gpsr/plan
-  - ナビゲーション状態 (/move_base/status など)
-  - HSRの状態（腕・グリッパ・音声合成結果など）
-- 出力:
-  - ナビゲーション用アクションゴール（/move_base 等）
-  - 操作・対話コマンド（後述ノードへサービス/アクション）
-  - /gpsr/state（現在のステート、デバッグ用）
-- 役割:
-  - GPSRタスク全体の状態遷移管理
-    - 待機 → 音声認識 → 意図解釈 → プランニング → 移動 → 探索 → 把持 → 配達 → 報告 → 待機
-  - 各サブタスクを nav_wrapper / task_executor に振り分け
-  - エラー時のリカバリ（聞き返し、再探索など）
-
-### ナビゲーション系ラッパ
-#### 6. hsr_nav_client_node（hsr_nav_wrapper 内）
-- 入力:
-  - /gpsr/nav_goal（GPSR側からの抽象ゴール：“kitchen”, “living_room” など）
-- 出力:
-  - move_base アクション (/move_base/goal, /move_base/result, /move_base/feedback)
-  - /gpsr/nav_status（ナビゲーションの成功/失敗/実行中）
-- 役割:
-  - 「部屋名」などのシンボル → 実座標 (map 座標) への変換
-  - Nav Stack へのアクション送信、結果とエラーのラップ
-  - 必要なら costmap・local planner 設定もまとめて管理
-
-### HSR の操作系（例示）
-#### 7. hsr_task_executor_node（hsr_task_executor 内）
-- 入力:
-  - /gpsr/exec_command（「Xを拾ってYへ運べ」などの抽象コマンド）
-- 内部で利用:
-  - HSR固有のトピック/サービス（腕、頭の向き、グリッパ開閉、音声合成など）
-- 出力:
-  - /gpsr/exec_status（成功/失敗/途中）
-- 役割:
-  - 抽象コマンドを HSR の低レベルインタフェースに分解
-  - 例: 視線誘導 → 物体検出 → 位置合わせ → 把持 → ナビゲーション呼び出し → 置く
-
-### bringup・ユーティリティ系
-#### 8.hsr_gpsr_bringup 内の launch 構成
-- gpsr_system.launch（全部を一気に立ち上げる）
-  - audio_capture
-  - silero_vad_node
-  - faster_whisper_asr_node
-  - gpsr_command_parser_node
-  - gpsr_smach_node
-  - hsr_nav_client_node
-  - hsr_task_executor_node
-  - gpsr_debug.launch（ASR/NLPだけなど部分起動用）
-
-## 3. 使用するトピック・サービス・アクション（例）
-### 音声・VAD・ASR
-- /audio
-  - audio_common_msgs/AudioData
-  - publisher: audio_capture
-  - subscriber: silero_vad_node, faster_whisper_asr_node（必要に応じて）
-- /vad/segments
-  - 型（自作）：hsr_msgs/VADSegmentArray など
-    - 含まれる情報：segment_id, start_time, end_time, is_speech, energy …
-  - pub: silero_vad_node
-  - sub: faster_whisper_asr_node, gpsr_smach_node（オプション）
-- /asr/text
-  - std_msgs/String
-  - pub: faster_whisper_asr_node
-  - sub: gpsr_command_parser_node, デバッグノード
-- /asr/partial_text（任意）
-  - std_msgs/String
-  - リアルタイム表示・インタラクション用
-- /asr/confidence（任意）
-  - std_msgs/Float32 など
-  - 低信頼度なら聞き返しを促すなど
-- /asr/result
-  - hsr_msgs/ASRResult（文字列＋信頼度＋タイムスタンプ＋言語情報など）
-  - 「NLP側はこのトピックだけ見ればよい」ように抽象化
-
-### GPSR 意図・プラン
-- /gpsr/intent
-  - hsr_msgs/GPSRIntent（intent_type: enum, raw_text 等）
-  - pub: gpsr_command_parser_node
-  - sub: gpsr_smach_node
-- /gpsr/slots
-  - hsr_msgs/GPSRSlots
-  - 例: target_object, source_location, destination_location, person など
-- /gpsr/plan（任意）
-  - hsr_msgs/GPSRPlan（サブタスク列）
-- /gpsr/state
-  - std_msgs/String or hsr_msgs/GPSRState
-  - smachの現在ステート名／ステータス可視化
-- /gpsr/nav_goal
-  - hsr_msgs/NavGoal（場所ID or 座標）
-  - pub: gpsr_smach_node
-  - sub: hsr_nav_client_node
-- /gpsr/nav_status
-  - hsr_msgs/NavStatus
-  - pub: hsr_nav_client_node
-  - sub: gpsr_smach_node
-- /gpsr/exec_command
-  - hsr_msgs/ExecCommand（操作コマンド）
-  - pub: gpsr_smach_node
-  - sub: hsr_task_executor_node
-- /gpsr/exec_status
-  - hsr_msgs/ExecStatus
-  - pub: hsr_task_executor_node
-  - sub: gpsr_smach_node
-
-### nav stack（例: move_base）
-- アクション：/move_base（move_base_msgs/MoveBaseAction）
-  - goal: 目的地の geometry_msgs/PoseStamped
-  - feedback/result: ナビゲーション状態
-  - クライアント: hsr_nav_client_node
-  - サーバ: 既存の nav stack ノード
-- トピック：
-  - /amcl_pose, /map, /tf などは既存 HSR/nav stack に依存
-
-### HSR操作系（例）
-ここは HSR 公式インタフェースに依存しますが、イメージとして：
-- サービス：
-  - /hsr/head_look_at
-  - /hsr/gripper_control
-  - /hsr/speak など
-- これらを hsr_task_executor_node から呼び出し
-- gpsr_smach_node は基本的に高レベルコマンドを投げるだけにする
-
-4. 全体アーキテクチャの図（テキスト図）
-```
-[マイク]
-   |
-   v
-[audio_capture]  ----->  /audio  -----------------------------+
-                                                              |
-                                                   +----------+----------+
-                                                   |                     |
-                                          [silero_vad_node]      [faster_whisper_asr_node]
-                                                   |                     |
-                                         /vad/segments           /asr/text, /asr/result
-                                                   \                     /
-                                                    \                   /
-                                                     v                 v
-                                                 [gpsr_command_parser_node]
-                                                     |
-                                /gpsr/intent, /gpsr/slots, /gpsr/plan
-                                                     |
-                                                     v
-                                                 [gpsr_smach_node]
-                                  +------------------+-------------------+
-                                  |                                      |
-                           /gpsr/nav_goal                         /gpsr/exec_command
-                                  v                                      v
-                        [hsr_nav_client_node]                    [hsr_task_executor_node]
-                                  |                                      |
-                               /move_base action                  HSR固有API/トピック
-                                  |                                      |
-                             (ナビゲーション)                  (把持・運搬・報告 etc.)
-
-
-smach ノードが「脳（タスクマネージャ）」で、
-audio_pipeline（VAD+Whisper）が「耳」、
-nav_wrapper が「足」、
-task_executor が「手・口」という分担です。
-```
-
-
-
-
-
-
-
-
-
 
