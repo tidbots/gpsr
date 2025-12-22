@@ -151,7 +151,7 @@ utterace_end=Trueのたびに
 命令文を直接配信する
 ```
 rostopic pub /asr/text std_msgs/String \
-"data: 'Find a sponge in the living room then get it and bring it to me'" -1
+"data: 'Find a cleaning supply in the bedroom then get it and put it on the refrigerator'" -1
 ```
 
 別のターミナルで
