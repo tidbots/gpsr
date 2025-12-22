@@ -11,8 +11,8 @@ def callback(msg):
 
 def main():
     rospy.init_node("gpsr_intent_echo")
-    rospy.Subscriber("/gpsr/intent", String, callback)
-    rospy.loginfo("gpsr_intent_echo: subscribed to /gpsr/intent")
+    rospy.Subscriber("/gpsr/intent_json", String, callback)
+    rospy.loginfo("gpsr_intent_echo: subscribed to /gpsr/intent_json")
     rospy.spin()
 
 if __name__ == "__main__":
