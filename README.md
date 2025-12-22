@@ -177,7 +177,44 @@ data:
 	"context": {"lang": "en", "source" : "parser"}
 }
 ```
-
+```
+data:
+{
+	"schema": "gpsr_intent_v1",
+	"ok": true,
+	"need_confirm": false,
+	"intent_type": "bring",
+	"raw_text": "Fetch a food from the sofa and deliver it to me",
+	"normalized_text": "fetch a food from the sofa and deliver it to me",
+	"confidence": null,
+	"source": "parser",
+	"command_kind": "bringMeObjFromPlcmt",
+	"slots":
+	{
+		"object": null,
+		"object_category": "food",
+		"quantity": null,
+		"source_room": null,
+		"source_place": null,
+		"destination_room": null,
+		"destination_place" : null,
+		"person": null,
+		"person_at_source": null,
+		"person_at_destination" : null,
+		"question_type": null,
+		"attribute": null,
+		"comparison": null,
+		"gesture" : null,
+		"pose": null,
+		"info_type": null,
+		"info_text": null
+	},
+	"steps": [
+		{"action": "bring_object_to_operator", "args": {"source_place": "sofa","object_category\": \"food\"}}],
+	"extras": {"legacy_slots": {}},
+	"context": {"lang": "en", "source": "parser"}
+}
+```
 
 ## 誤認識ログを使って品質を改良する
 ロガー　gpsr_asr_logger.py
