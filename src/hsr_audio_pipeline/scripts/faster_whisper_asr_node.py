@@ -21,8 +21,13 @@ faster_whisper_asr_node.py
     Default: /data/vocab/commands.txt
 - **IMPORTANT**: rospy.spin() is guaranteed (no clean exit)
 """
-
 import os
+import sys
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
 import re
 import time
 import yaml
