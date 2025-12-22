@@ -109,6 +109,7 @@
     <param name="pre_roll" value="0.35"/>
     <param name="post_roll" value="0.45"/>
     <param name="max_segment_sec" value="22.0"/>
+    <param name="finalize_cooldown_sec" value="0.8"/>
 
     <param name="vocab_dir"           value="$(arg vocab_dir)"/>
     <param name="vocab_yaml"          value="$(arg vocab_yaml)"/>
