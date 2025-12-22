@@ -1,0 +1,49 @@
+<launch>
+  <!-- gpsr_parser_node.launch (updated)
+       Subscribes to ASR outputs and publishes /gpsr/intent as JSON string (gpsr_intent_v1).
+  -->
+
+  <!-- ===== Topics ===== -->
+  <arg name="text_topic"           default="/gpsr/asr/text" />
+  <arg name="utterance_end_topic"  default="/gpsr/asr/utterance_end" />
+  <arg name="confidence_topic"     default="/gpsr/asr/confidence" />
+  <arg name="intent_topic"         default="/gpsr/intent" />
+
+  <!-- ===== Vocab ===== -->
+  <arg name="vocab_dir"       default="/data/vocab" />
+  <arg name="vocab_yaml"      default="$(arg vocab_dir)/vocab.yaml" />
+  <arg name="names_md"        default="$(arg vocab_dir)/names.md" />
+  <arg name="rooms_md"        default="$(arg vocab_dir)/room_names.md" />
+  <arg name="locations_md"    default="$(arg vocab_dir)/location_names.md" />
+  <arg name="objects_md"      default="$(arg vocab_dir)/objects.md" />
+  <arg name="test_objects_md" default="$(arg vocab_dir)/test_objects.md" />
+
+  <!-- ===== Behavior ===== -->
+  <arg name="max_text_age_sec"       default="30.0" />
+  <arg name="min_confidence"         default="-1.0" />
+  <arg name="utt_end_retry_count"    default="8" />
+  <arg name="utt_end_retry_sleep"    default="0.02" />
+  <arg name="debounce_same_text_sec" default="1.5" />
+
+  <node pkg="hsr_audio_pipeline" type="gpsr_parser_node.py"
+        name="gpsr_parser_node" output="screen">
+    <param name="text_topic"          value="$(arg text_topic)" />
+    <param name="utterance_end_topic" value="$(arg utterance_end_topic)" />
+    <param name="confidence_topic"    value="$(arg confidence_topic)" />
+    <param name="intent_topic"        value="$(arg intent_topic)" />
+
+    <param name="vocab_dir"           value="$(arg vocab_dir)" />
+    <param name="vocab_yaml"          value="$(arg vocab_yaml)" />
+    <param name="names_md"            value="$(arg names_md)" />
+    <param name="rooms_md"            value="$(arg rooms_md)" />
+    <param name="locations_md"        value="$(arg locations_md)" />
+    <param name="objects_md"          value="$(arg objects_md)" />
+    <param name="test_objects_md"     value="$(arg test_objects_md)" />
+
+    <param name="max_text_age_sec"       value="$(arg max_text_age_sec)" />
+    <param name="min_confidence"         value="$(arg min_confidence)" />
+    <param name="utt_end_retry_count"    value="$(arg utt_end_retry_count)" />
+    <param name="utt_end_retry_sleep"    value="$(arg utt_end_retry_sleep)" />
+    <param name="debounce_same_text_sec" value="$(arg debounce_same_text_sec)" />
+  </node>
+</launch>
