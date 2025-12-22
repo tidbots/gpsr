@@ -161,6 +161,8 @@
   <param name="queue_size" value="10"/>
   <param name="coalesce_same_text_sec" value="1.0"/>
   <param name="max_queue_wait_sec" value="120.0"/>
+  <param name="robot_impl" value="dummy"/>
+  <param name="dummy_sleep_sec" value="0.3"/>
 </node>
 
 </launch>
