@@ -20,7 +20,7 @@
 | baseball | ![](known_objects/toys!toy/baseball.png) |
 | soccer_ball | ![](known_objects/toys!toy/soccer_ball.jpg) |
 | dice | ![](known_objects/toys!toy/dice.png) |
-
+| tuna | ![](known_objects/toys!toy/dice.png) |
 
 # Class fruits (fruit)
 
