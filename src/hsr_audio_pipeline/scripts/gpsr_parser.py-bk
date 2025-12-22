@@ -43,7 +43,7 @@ def split_into_clauses(text: str) -> List[str]:
     # selective 'and' -> 'then' for verb-to-verb chaining
     t = re.sub(
         r"\b(meet|introduce yourself|salute|say hello|go|navigate)\b(.+?)\band\s+"
-        r"(follow|lead|guide|escort|take|answer|tell|say)\b",
+        r"(follow|lead|guide|escort|answer|tell|say)\b",
         r"\1\2 then \3",
         t,
     )
@@ -201,19 +201,15 @@ class GpsrParser:
 
     # ---------- internal ----------
 
-
     def _parse_clause_multi(self, clause: str) -> Tuple[List[GpsrStep], Optional[str]]:
         """
         1 clause から複数 step を作れる版。
-        典型：
-          - "get it and bring it to me"
-          - "grasp a mustard from the storage rack and give it to the lying person in the kitchen"
+        典型： "get it and bring it to me"
         """
         c = clause.strip().strip(".")
         if not c:
             return [], None
 
-        # (A) it/them chaining: "get it and bring it to me"
         m = re.match(r"^(get it|take it|grab it|pick it up|get them|take them|grab them)\s+and\s+(.+)$", c)
         if m:
             first = m.group(1).strip()
@@ -229,35 +225,9 @@ class GpsrParser:
 
             return steps, (k2 or k1 or "takeObj")
 
-        # (B) object-from-place chaining
-        m = re.match(
-            r"^(?:grasp|grab|take|get|pick up)\s+(?:a|an|the)?\s*(.+?)\s+from the\s+(.+?)\s+and\s+(.+)$",
-            c
-        )
-        if m:
-            obj_str = m.group(1).strip()
-            from_str = m.group(2).strip()
-            rest = m.group(3).strip()
-
-            obj = self.match_object_or_category(obj_str)
-            from_plc = self.match_place(from_str)
-            if not from_plc:
-                s, k = self._parse_clause(c)
-                return ([s] if s else []), k
-
-            fields: Dict[str, Any] = {"place": from_plc}
-            fields["object_or_category"] = (obj or self._strip_articles(obj_str))
-
-            steps: List[GpsrStep] = [GpsrStep(action="take_object_from_place", fields=fields)]
-
-            s2, k2 = self._parse_clause(rest)
-            if s2:
-                steps.append(s2)
-
-            return steps, (k2 or "takeObjFromPlcmt")
-
         s, k = self._parse_clause(c)
         return ([s] if s else []), k
+
     def _parse_clause(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
         c = clause.strip().strip(".")
         if not c:
@@ -268,25 +238,12 @@ class GpsrParser:
             # ---- it/them delivery ----
             self._parse_bring_it_to_me,
             self._parse_bring_it_to_person_in_room,
-            self._parse_bring_it_to_person_with_attribute_in_room,
-
-            # ---- A0: social / meeting / greeting / introduce (NEW) ----
-            self._parse_meet_named_person_in_room,
-            self._parse_greet_named_or_filtered_person_in_room,
-            self._parse_introduce_self_to_person_in_room,
-            self._parse_follow_them,
-            self._parse_guide_them_to_place,
-            self._parse_tell_or_say_info_to_person_in_room,
-            self._parse_tell_or_say_info_to_person_at_place,
 
             # ---- A: follow/take/escort/lead family (NEW) ----
             self._parse_follow_name_from_to,
             self._parse_follow_person_with_attribute_at_place,
             self._parse_follow_name_at_place,
             self._parse_take_name_from_to,
-
-            # ---- pose / gesture query ----
-            self._parse_tell_pose_or_gesture_of_person,
 
             # ---- compare / attribute counting ----
             self._parse_compare_object_on_place,
@@ -309,203 +266,6 @@ class GpsrParser:
                 return s, k
 
         return None, None
-
-
-    # ---- A0: social / meeting / greeting / introduce (NEW) ----
-
-    def _parse_meet_named_person_in_room(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "meet adel in the office"
-        m = re.search(r"^(?:meet)\s+(.+?)\s+in the\s+(.+)$", clause)
-        if not m:
-            return None, None
-        name = self.match_name(m.group(1).strip())
-        room = self.match_room(m.group(2).strip())
-        if not room:
-            return None, None
-        fields: Dict[str, Any] = {"room": room}
-        if name:
-            fields["name"] = name
-        return GpsrStep(action="meet_person_in_room", fields=fields), "meetPrsInRoom"
-
-    def _parse_greet_named_or_filtered_person_in_room(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "greet simone in the office"
-        m = re.search(r"^(?:greet|salute)\s+(.+?)\s+in the\s+(.+)$", clause)
-        if m:
-            who = m.group(1).strip()
-            room = self.match_room(m.group(2).strip())
-            if not room:
-                return None, None
-            name = self.match_name(who)
-            fields: Dict[str, Any] = {"room": room}
-            if name:
-                fields["name"] = name
-                return GpsrStep(action="greet_named_person_in_room", fields=fields), "greetNameInRoom"
-            # fallback: treat as person filter
-            fields["person_filter"] = who if who.startswith("person") else f"person {who}"
-            return GpsrStep(action="greet_person_in_room", fields=fields), "greetPrsInRoom"
-
-        # "say hello to axel in the kitchen"
-        m = re.search(r"^(?:say hello to|say hi to|hello)\s+(.+?)\s+in the\s+(.+)$", clause)
-        if m:
-            who = m.group(1).strip()
-            room = self.match_room(m.group(2).strip())
-            if not room:
-                return None, None
-            name = self.match_name(who)
-            fields: Dict[str, Any] = {"room": room}
-            if name:
-                fields["name"] = name
-                return GpsrStep(action="greet_named_person_in_room", fields=fields), "greetNameInRoom"
-            fields["person_filter"] = who if who.startswith("person") else f"person {who}"
-            return GpsrStep(action="greet_person_in_room", fields=fields), "greetPrsInRoom"
-
-        # "say hello to the person wearing a white jacket in the living room"
-        m = re.search(r"^(?:say hello to|say hi to)\s+the\s+(.+?)\s+in the\s+(.+)$", clause)
-        if m:
-            who = m.group(1).strip()
-            room = self.match_room(m.group(2).strip())
-            if not room:
-                return None, None
-            fields = {"room": room, "person_filter": who if who.startswith("person") else f"person {who}"}
-            return GpsrStep(action="greet_person_in_room", fields=fields), "greetPrsInRoom"
-
-        return None, None
-
-    def _parse_introduce_self_to_person_in_room(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "introduce yourself to morgan in the bathroom"
-        m = re.search(r"^(?:introduce yourself to)\s+(.+?)\s+in the\s+(.+)$", clause)
-        if not m:
-            return None, None
-        who = m.group(1).strip()
-        room = self.match_room(m.group(2).strip())
-        if not room:
-            return None, None
-
-        name = self.match_name(who)
-        fields: Dict[str, Any] = {"room": room}
-        if name:
-            fields["name"] = name
-            return GpsrStep(action="introduce_self_to_named_person_in_room", fields=fields), "introSelfToNameInRoom"
-
-        # allow: "the person wearing ..." / "person wearing ..."
-        who = re.sub(r"^the\s+", "", who).strip()
-        fields["person_filter"] = who if who.startswith("person") else f"person {who}"
-        return GpsrStep(action="introduce_self_to_person_in_room", fields=fields), "introSelfToPrsInRoom"
-
-    def _parse_follow_them(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "follow them"
-        if clause.strip() in ("follow them", "follow him", "follow her"):
-            return GpsrStep(action="follow_last_person", fields={}), "followLastPrs"
-        return None, None
-
-    def _parse_guide_them_to_place(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "lead them to the waste basket"
-        # "guide them to the potted plant"
-        # "take them to the bedroom"
-        m = re.search(r"^(?:take|lead|escort|guide)\s+them\s+to the\s+(.+)$", clause)
-        if not m:
-            return None, None
-        dest = self.match_place(m.group(1).strip())
-        if not dest:
-            return None, None
-        return GpsrStep(action="guide_last_person_to_place", fields={"to_place": dest}), "guideLastPrsToPlc"
-
-
-    # ---- B: tell/say info to person (NEW) ----
-
-    def _normalize_info_key(self, info: str) -> str:
-        """
-        Normalize "what to say/tell" into a compact info_type key.
-        Keep it conservative: if unknown, return the raw cleaned phrase.
-        """
-        s = normalize_text(info).strip().strip(".")
-        s = re.sub(r"^the\s+", "", s).strip()
-        s = s.replace("team's", "teams").replace("team’s", "teams")
-
-        # canonical mappings (most common in GPSR)
-        mapping = {
-            "time": "time",
-            "the time": "time",
-            "say the time": "time",
-
-            "day of the week": "day_of_week",
-            "the day of the week": "day_of_week",
-
-            "day of the month": "day_of_month",
-            "the day of the month": "day_of_month",
-
-            "what day is today": "what_day_today",
-            "what day is tomorrow": "what_day_tomorrow",
-
-            "your teams name": "team_name",
-            "your teams affiliation": "team_affiliation",
-            "your teams country": "team_country",
-
-            "something about yourself": "about_self",
-        }
-        return mapping.get(s, s)
-
-    def _parse_tell_or_say_info_to_person_in_room(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        """
-        Examples:
-          - "say your teams name to the waving person in the living room"
-          - "tell the day of the month to the person raising their right arm in the bedroom"
-          - "say what day is tomorrow to axel in the office"
-          - "tell something about yourself to the person pointing to the right in the living room"
-        """
-        m = re.search(r"^(?:tell|say)\s+(.+?)\s+to\s+(?:the\s+)?(.+?)\s+in the\s+(.+)$", clause)
-        if not m:
-            return None, None
-
-        info_str = m.group(1).strip()
-        who_str = m.group(2).strip()
-        room = self.match_room(m.group(3).strip())
-        if not room:
-            return None, None
-
-        info_type = self._normalize_info_key(info_str)
-
-        fields: Dict[str, Any] = {"room": room, "info_type": info_type, "info_text": info_str}
-
-        name = self.match_name(who_str)
-        if name:
-            fields["name"] = name
-        else:
-            # normalize who as person_filter
-            who_str = re.sub(r"^the\s+", "", who_str).strip()
-            fields["person_filter"] = who_str if who_str.startswith("person") else f"person {who_str}"
-
-        return GpsrStep(action="tell_information_to_person_in_room", fields=fields), "tellInfoToPrsInRoom"
-
-    def _parse_tell_or_say_info_to_person_at_place(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        """
-        Example:
-          - "say the time to the person at the sofa"
-          - "tell your teams affiliation to axel at the sink"
-        """
-        m = re.search(r"^(?:tell|say)\s+(.+?)\s+to\s+(?:the\s+)?(.+?)\s+at the\s+(.+)$", clause)
-        if not m:
-            return None, None
-
-        info_str = m.group(1).strip()
-        who_str = m.group(2).strip()
-        plc = self.match_place(m.group(3).strip())
-        if not plc:
-            return None, None
-
-        info_type = self._normalize_info_key(info_str)
-
-        fields: Dict[str, Any] = {"place": plc, "info_type": info_type, "info_text": info_str}
-
-        name = self.match_name(who_str)
-        if name:
-            fields["name"] = name
-        else:
-            who_str = re.sub(r"^the\s+", "", who_str).strip()
-            fields["person_filter"] = who_str if who_str.startswith("person") else f"person {who_str}"
-
-        return GpsrStep(action="tell_information_to_person_at_place", fields=fields), "tellInfoToPrsAtPlc"
-
 
     # ===================== parsers =====================
 
@@ -538,29 +298,6 @@ class GpsrParser:
         return GpsrStep(action="deliver_object_to_person_in_room", fields=fields), "deliverObjToPrsInRoom"
 
     # ---- A: follow/take/escort/lead family (NEW) ----
-
-    def _parse_bring_it_to_person_with_attribute_in_room(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "give it to the lying person in the kitchen"
-        # "deliver it to the person pointing to the left in the living room"
-        m = re.search(r"^(?:bring|deliver|give|hand)\s+(it|them)\s+to\s+the\s+(.+?)\s+person\s+in the\s+(.+)$", clause)
-        if m:
-            attr = m.group(2).strip()
-            room = self.match_room(m.group(3).strip())
-            if not room:
-                return None, None
-            fields: Dict[str, Any] = {"room": room, "person_filter": f"person {attr}"}
-            return GpsrStep(action="deliver_object_to_person_in_room", fields=fields), "deliverObjToPrsInRoom"
-
-        m = re.search(r"^(?:bring|deliver|give|hand)\s+(it|them)\s+to\s+the\s+person\s+(.+?)\s+in the\s+(.+)$", clause)
-        if not m:
-            return None, None
-        attr = m.group(2).strip()
-        room = self.match_room(m.group(3).strip())
-        if not room:
-            return None, None
-        fields = {"room": room, "person_filter": f"person {attr}"}
-        return GpsrStep(action="deliver_object_to_person_in_room", fields=fields), "deliverObjToPrsInRoom"
-
 
     def _parse_follow_name_from_to(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
         # "follow paris from the shelf to the kitchen"
@@ -819,34 +556,6 @@ class GpsrParser:
         fields["object_or_category"] = (obj if obj else obj_str)
 
         return GpsrStep(action="compare_object_on_place", fields=fields), "tellCompareObjOnPlcmt"
-
-
-    # ---- tellPose/Gesture of person ----
-    def _parse_tell_pose_or_gesture_of_person(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:
-        # "tell me the pose of the person in the bathroom"
-        # "tell me the gesture of the person at the kitchen table"
-        if not any(clause.startswith(p) for p in self.tell_prefixes):
-            return None, None
-
-        m = re.search(r"^tell me the\s+(pose|gesture)\s+of the person\s+in the\s+(.+)$", clause)
-        if m:
-            which = m.group(1).strip()
-            room = self.match_room(m.group(2).strip())
-            if not room:
-                return None, None
-            fields = {"room": room, "person_filter": "person", "attribute_type": which}
-            return GpsrStep(action="tell_person_attribute_in_room", fields=fields), ("tellPoseOfPrsInRoom" if which == "pose" else "tellGestOfPrsInRoom")
-
-        m = re.search(r"^tell me the\s+(pose|gesture)\s+of the person\s+at the\s+(.+)$", clause)
-        if not m:
-            return None, None
-        which = m.group(1).strip()
-        plc = self.match_place(m.group(2).strip())
-        if not plc:
-            return None, None
-        fields = {"place": plc, "person_filter": "person", "attribute_type": which}
-        return GpsrStep(action="tell_person_attribute_at_place", fields=fields), ("tellPoseOfPrsAtPlc" if which == "pose" else "tellGestOfPrsAtPlc")
-
 
     # ---- tellNameOfPerson ----
     def _parse_tell_name_of_person(self, clause: str) -> Tuple[Optional[GpsrStep], Optional[str]]:

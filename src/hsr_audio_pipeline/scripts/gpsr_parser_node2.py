@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-gpsr_parser_node.py (ROS1 Noetic)
-
-- Subscribes:
-    ~text_topic (std_msgs/String): ASR final text
-    ~utterance_end_topic (std_msgs/Bool): utterance end trigger
-    ~confidence_topic (std_msgs/Float32): optional ASR confidence
-- Publishes:
-    ~intent_topic (std_msgs/String): JSON payload (schema=gpsr_intent_v1)
-
-This node is designed to work with gpsr_parser.py (GpsrParser.parse()) and focuses on:
-- vocab loading (MD preferred; YAML fallback)
-- debounce + confidence gate
-- coerce parse result into gpsr_intent_v1
-- lightweight reference resolution for it/them across steps
-- slot filling for downstream SMACH/BT executors
-"""
 
 import os
 import sys
@@ -32,9 +15,8 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-# optional: also allow importing from hsr_audio_pipeline/scripts when running inside that package
 try:
-    import rospkg  # type: ignore
+    import rospkg
     _pkg_dir = rospkg.RosPack().get_path("hsr_audio_pipeline")
     _scripts_dir = os.path.join(_pkg_dir, "scripts")
     if _scripts_dir not in sys.path:
@@ -42,20 +24,16 @@ try:
 except Exception:
     pass
 
-from gpsr_parser import GpsrParser  # noqa: E402
+from gpsr_parser import GpsrParser
 
 
 def _normalize_ws(s: str) -> str:
     s = (s or "").strip()
-    return " ".join(s.split())
+    s = " ".join(s.split())
+    return s
 
 
 def _collapse_duplicated_sentence(text: str) -> str:
-    """
-    Some ASR pipelines produce duplicated sentence like:
-        "do X. do X."
-    Collapse it to one.
-    """
     t = _normalize_ws(text)
     if not t:
         return t
@@ -114,27 +92,23 @@ def _safe_read(path: str) -> str:
 
 
 def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects_md: str, test_objects_md: str = ""):
-    """
-    The MD formats are those used by RoboCup@Home command generator repos.
-    This parser is intentionally tolerant (regex-based).
-    """
     names = re.findall(r"\|\s*([A-Za-z]+)\s*\|", _safe_read(names_md))
     names = [x.strip() for x in names][1:] if names else []
 
-    rooms = re.findall(r"\|\s*([A-Za-z][A-Za-z\s]*)\s*\|", _safe_read(rooms_md))
+    rooms = re.findall(r"\|\s*(\w+ \w*)\s*\|", _safe_read(rooms_md))
     rooms = [x.strip() for x in rooms][1:] if rooms else []
 
-    loc_pairs = re.findall(r"\|\s*([0-9]+)\s*\|\s*([A-Za-z0-9,\s\(\)\-]+)\|", _safe_read(locations_md))
+    loc_pairs = re.findall(r"\|\s*([0-9]+)\s*\|\s*([A-Za-z,\s\(\)]+)\|", _safe_read(locations_md))
     locs = [b.strip() for (_, b) in loc_pairs]
     placement = [x.replace("(p)", "").strip() for x in locs if x.strip().endswith("(p)")]
     locs = [x.replace("(p)", "").strip() for x in locs]
 
     md_obj = _safe_read(objects_md)
-    obj_names = re.findall(r"\|\s*([A-Za-z0-9_]+)\s*\|", md_obj)
-    obj_names = [o for o in obj_names if o.lower() != "objectname"]
+    obj_names = re.findall(r"\|\s*(\w+)\s*\|", md_obj)
+    obj_names = [o for o in obj_names if o != "Objectname"]
     obj_names = [o.replace("_", " ").strip() for o in obj_names if o.strip()]
 
-    cats = re.findall(r"#\s*Class\s*([\w,\s\(\)\-]+)\s*", md_obj)
+    cats = re.findall(r"# Class \s*([\w,\s\(\)]+)\s*", md_obj)
     cats = [c.strip().replace("(", "").replace(")", "") for c in cats]
     cat_plur, cat_sing = [], []
     for c in cats:
@@ -145,8 +119,8 @@ def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects
 
     if test_objects_md and os.path.exists(test_objects_md):
         md_test = _safe_read(test_objects_md)
-        test_objs = re.findall(r"\|\s*([A-Za-z0-9_]+)\s*\|", md_test)
-        test_objs = [o for o in test_objs if o.lower() != "objectname"]
+        test_objs = re.findall(r"\|\s*(\w+)\s*\|", md_test)
+        test_objs = [o for o in test_objs if o != "Objectname"]
         test_objs = [o.replace("_", " ").strip() for o in test_objs if o.strip()]
         obj_names = sorted(set(obj_names + test_objs))
 
@@ -162,7 +136,6 @@ def _load_vocab_from_md(names_md: str, rooms_md: str, locations_md: str, objects
 
 
 class GpsrParserNode:
-    # fixed slots for downstream components
     FIXED_SLOT_KEYS = [
         "object",
         "object_category",
@@ -178,64 +151,30 @@ class GpsrParserNode:
         "attribute",
         "comparison",
         "gesture",
-        "pose",
-        "info_type",
-        "info_text",
     ]
 
-    # action -> (intent_type, command_kind)
     ACTION_HINTS = {
-        # core manipulation / navigation
         "bring_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
         "deliver_object_to_person_in_room": ("bring", "deliverObjToPrsInRoom"),
+        "deliver_object_to_operator": ("bring", "bringMeObjFromPlcmt"),
+        "answer_to_person_in_room": ("answer", "answerToPrsInRoom"),
+        "talk_to_person_in_room": ("answer", "talkInfoToGestPrsInRoom"),
+        "count_persons_in_room": ("answer", "countPrsInRoom"),
+        "guide_named_person_from_place_to_place": ("guide", "guideNameFromBeacToBeac"),
         "place_object_on_place": ("composite", "placeObjOnPlcmt"),
         "take_object": ("composite", "takeObj"),
-        "take_object_from_place": ("composite", "takeObjFromPlcmt"),
         "find_object_in_room": ("composite", "findObjInRoom"),
         "go_to_location": ("composite", "goToLoc"),
-
-        # follow/guide family
-        "follow_last_person": ("guide", "followLastPrs"),
-        "guide_last_person_to_place": ("guide", "guideLastPrsToPlc"),
-        "follow_person_at_place": ("guide", "followPrsAtBeac"),
-        "follow_named_person_in_room": ("guide", "followNameInRoom"),
-        "follow_named_person_at_place": ("guide", "followNameAtBeac"),
-        "follow_named_person_from_place_to_place": ("guide", "followNameFromBeacToBeac"),
-        "guide_named_person_from_place_to_place": ("guide", "guideNameFromBeacToBeac"),
-
-        # social
-        "meet_person_in_room": ("guide", "meetPrsInRoom"),
-        "greet_named_person_in_room": ("guide", "greetNameInRoom"),
-        "greet_person_in_room": ("guide", "greetPrsInRoom"),
-        "introduce_self_to_named_person_in_room": ("guide", "introSelfToNameInRoom"),
-        "introduce_self_to_person_in_room": ("guide", "introSelfToPrsInRoom"),
-
-        # Q&A / perception
-        "count_persons_in_room": ("answer", "countPrsInRoom"),
-        "count_objects_on_place": ("answer", "countObjOnPlcmt"),
-        "compare_object_on_place": ("answer", "tellCompareObjOnPlcmt"),
-        "answer_to_person_in_room": ("answer", "answerToPrsInRoom"),
-        "tell_name_of_person_at_place": ("answer", "tellNameOfPersonAtPlc"),
-
-        # B: tell/say information
-        "tell_information_to_person_in_room": ("answer", "tellInfoToPrsInRoom"),
-        "tell_information_to_person_at_place": ("answer", "tellInfoToPrsAtPlc"),
-
-        # C2: tell pose/gesture (attribute) about a person
-        "tell_person_attribute_in_room": ("answer", "tellGestOfPrsInRoom"),
-        "tell_person_attribute_at_place": ("answer", "tellGestOfPrsAtPlc"),
+        "follow_person_to_dest": ("guide", "followPersonToDest"),
     }
 
     def __init__(self):
-        # topics
         self.text_topic = rospy.get_param("~text_topic", "/gpsr/asr/text")
         self.utt_end_topic = rospy.get_param("~utterance_end_topic", "/gpsr/asr/utterance_end")
         self.conf_topic = rospy.get_param("~confidence_topic", "/gpsr/asr/confidence")
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent")
-
         self.lang = rospy.get_param("~lang", "en")
 
-        # vocab paths (prefer /data/vocab for docker bind-mount)
         self.vocab_dir = rospy.get_param("~vocab_dir", "/data/vocab")
         self.vocab_yaml = rospy.get_param("~vocab_yaml", os.path.join(self.vocab_dir, "vocab.yaml"))
 
@@ -245,26 +184,47 @@ class GpsrParserNode:
         self.objects_md = rospy.get_param("~objects_md", os.path.join(self.vocab_dir, "objects.md"))
         self.test_objects_md = rospy.get_param("~test_objects_md", os.path.join(self.vocab_dir, "test_objects.md"))
 
-        # gating
         self.max_text_age = float(rospy.get_param("~max_text_age_sec", 30.0))
         self.min_confidence = float(rospy.get_param("~min_confidence", -1.0))
 
-        # when utterance_end arrives slightly before final text
         self.utt_retry_count = int(rospy.get_param("~utt_end_retry_count", 8))
         self.utt_retry_sleep = float(rospy.get_param("~utt_end_retry_sleep", 0.02))
 
-        # debounce duplicated publish
-        self.debounce_same_text_sec = float(rospy.get_param("~debounce_same_text_sec", 1.5))
-
-        # state
         self._latest_text = ""
         self._latest_text_stamp = rospy.Time(0)
         self._latest_conf = None
+
+        self.debounce_same_text_sec = float(rospy.get_param("~debounce_same_text_sec", 1.5))
         self._last_pub_norm = ""
         self._last_pub_wall = 0.0
         self._pub_lock = threading.Lock()
 
-        vocab = self._load_vocab()
+        use_md = all([
+            self.names_md and os.path.exists(self.names_md),
+            self.rooms_md and os.path.exists(self.rooms_md),
+            self.locations_md and os.path.exists(self.locations_md),
+            self.objects_md and os.path.exists(self.objects_md),
+        ])
+
+        vocab = None
+        if use_md:
+            try:
+                vocab = _load_vocab_from_md(
+                    self.names_md,
+                    self.rooms_md,
+                    self.locations_md,
+                    self.objects_md,
+                    self.test_objects_md
+                )
+                rospy.loginfo("gpsr_parser_node: vocab loaded from MD dir=%s", self.vocab_dir)
+            except Exception as e:
+                rospy.logwarn("gpsr_parser_node: failed to load MD vocab (fallback to YAML): %s", e)
+                vocab = None
+
+        if vocab is None:
+            vocab = self._load_vocab_yaml(self.vocab_yaml)
+            rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
+
         self._obj_set = set([s.strip().lower() for s in vocab["object_names"] if isinstance(s, str)])
         self._cat_set = set([s.strip().lower() for s in (vocab["object_categories_singular"] + vocab["object_categories_plural"]) if isinstance(s, str)])
 
@@ -274,8 +234,6 @@ class GpsrParserNode:
         vocab["object_names"] = sorted(vocab["object_names"], key=lambda s: (-len(s), s.lower()))
         vocab["object_categories_plural"] = sorted(vocab["object_categories_plural"], key=lambda s: (-len(s), s.lower()))
         vocab["object_categories_singular"] = sorted(vocab["object_categories_singular"], key=lambda s: (-len(s), s.lower()))
-        vocab["person_names"] = sorted(vocab["person_names"], key=lambda s: (-len(s), s.lower()))
-        vocab["room_names"] = sorted(vocab["room_names"], key=lambda s: (-len(s), s.lower()))
 
         self.parser = GpsrParser(
             person_names=vocab["person_names"],
@@ -296,32 +254,13 @@ class GpsrParserNode:
             pass
 
         rospy.loginfo(
-            "gpsr_parser_node ready (text=%s, utt_end=%s, intent=%s, vocab_dir=%s)",
-            self.text_topic, self.utt_end_topic, self.intent_topic, self.vocab_dir
+            "gpsr_parser_node ready (text=%s, utt_end=%s, vocab_dir=%s, yaml=%s, md=%s)",
+            self.text_topic,
+            self.utt_end_topic,
+            self.vocab_dir,
+            self.vocab_yaml or "none",
+            "on" if use_md else "off"
         )
-
-    def _load_vocab(self):
-        use_md = all([
-            self.names_md and os.path.exists(self.names_md),
-            self.rooms_md and os.path.exists(self.rooms_md),
-            self.locations_md and os.path.exists(self.locations_md),
-            self.objects_md and os.path.exists(self.objects_md),
-        ])
-
-        if use_md:
-            try:
-                v = _load_vocab_from_md(
-                    self.names_md, self.rooms_md, self.locations_md,
-                    self.objects_md, self.test_objects_md
-                )
-                rospy.loginfo("gpsr_parser_node: vocab loaded from MD dir=%s", self.vocab_dir)
-                return v
-            except Exception as e:
-                rospy.logwarn("gpsr_parser_node: failed to load MD vocab (fallback to YAML): %s", e)
-
-        v = self._load_vocab_yaml(self.vocab_yaml)
-        rospy.loginfo("gpsr_parser_node: vocab loaded from YAML=%s", self.vocab_yaml)
-        return v
 
     def _load_vocab_yaml(self, yaml_path: str):
         if yaml_path and os.path.exists(yaml_path):
@@ -369,7 +308,6 @@ class GpsrParserNode:
                 object_categories_singular=sorted(set([x for x in cats_s if x])),
             )
 
-        # empty fallback
         return dict(
             person_names=[],
             room_names=[],
@@ -404,11 +342,13 @@ class GpsrParserNode:
         age = (now - self._latest_text_stamp).to_sec() if self._latest_text_stamp != rospy.Time(0) else 1e9
 
         if not self._latest_text or age > self.max_text_age:
-            rospy.logwarn("gpsr_parser_node: utterance_end but no fresh text (age=%.3f, text='%s')", age, self._latest_text)
+            rospy.logwarn("gpsr_parser_node: utterance_end but no fresh text (age=%.3f, text='%s')",
+                          age, self._latest_text)
             return
 
         if self.min_confidence >= 0.0 and self._latest_conf is not None and self._latest_conf < self.min_confidence:
-            rospy.logwarn("gpsr_parser_node: confidence gate (conf=%.3f < %.3f) skip", self._latest_conf, self.min_confidence)
+            rospy.logwarn("gpsr_parser_node: confidence gate (conf=%.3f < %.3f) skip",
+                          self._latest_conf, self.min_confidence)
             return
 
         raw = _collapse_duplicated_sentence(self._latest_text)
@@ -421,36 +361,16 @@ class GpsrParserNode:
             self._last_pub_norm = norm
             self._last_pub_wall = now_wall
 
-        rospy.loginfo("parse: %s", raw)
+        rospy.loginfo("parse: %s", raw.lower())
 
         try:
             parsed_obj = self.parser.parse(raw)
         except Exception as e:
-            rospy.logerr("gpsr_parser_node: parse exception: %s", e)
-            # publish a fail payload for downstream recovery
-            payload = self._make_fail_payload(raw_text=raw, reason=str(e))
-            self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
+            rospy.logerr("parse failed: %s", e)
             return
 
         payload = self._coerce_to_v1(parsed_obj, raw)
         self.pub_intent.publish(String(data=json.dumps(payload, ensure_ascii=False)))
-
-    def _make_fail_payload(self, raw_text: str, reason: str):
-        return {
-            "schema": "gpsr_intent_v1",
-            "ok": False,
-            "need_confirm": True,
-            "intent_type": "",
-            "raw_text": raw_text,
-            "normalized_text": (raw_text or "").lower(),
-            "confidence": self._latest_conf,
-            "source": "parser",
-            "command_kind": "",
-            "slots": {k: None for k in self.FIXED_SLOT_KEYS},
-            "steps": [],
-            "extras": {"error": reason},
-            "context": {"lang": self.lang, "source": "parser"},
-        }
 
     # ---------- classifier ----------
     def _classify_obj_or_cat(self, s: str):
@@ -470,68 +390,77 @@ class GpsrParserNode:
         if (v + "s") in self._cat_set:
             return "category", _normalize_ws(str(s))
 
-        # default: treat as category (safer for "a snack"/"a drink")
         return "category", _normalize_ws(str(s))
 
+    # ---------- NEW: unify args to object/object_category ----------
     def _canonicalize_object_fields(self, args: dict) -> dict:
+        """
+        args の object系キーを正規化する。
+        ルール：
+          - object_or_category があれば分類して object or object_category に移す
+          - object があってもカテゴリなら object_category に寄せる（bring等で来るため）
+          - 可能な限り object_or_category は削除する
+        """
         if not isinstance(args, dict):
             return {}
 
+        # 1) object_or_category -> classified
         if args.get("object_or_category"):
             kind, val = self._classify_obj_or_cat(args.get("object_or_category"))
             if kind == "object":
                 args.setdefault("object", val)
             elif kind == "category":
                 args.setdefault("object_category", val)
+            # 統一のため削除
             args.pop("object_or_category", None)
 
+        # 2) object があるがカテゴリだった場合は object_category に移す
         if args.get("object") and not args.get("object_category"):
             kind, val = self._classify_obj_or_cat(args.get("object"))
             if kind == "category":
                 args["object_category"] = val
                 args.pop("object", None)
 
+        # 3) object_category があれば整形
         if args.get("object_category"):
             args["object_category"] = _normalize_ws(str(args["object_category"]))
+
+        # 4) object があれば整形
         if args.get("object"):
             args["object"] = _normalize_ws(str(args["object"]))
 
         return args
 
-    # ---------- reference resolver (it/them / last person) ----------
+    # ---------- reference resolver (it/them) ----------
     def _apply_reference_resolution_and_unify(self, steps: list) -> dict:
         """
-        Keeps minimal state across steps:
-        - last object / category
-        - last person (for follow/guide to use "them")
+        - it/them 参照解決で欠けている object/object_category を補完
+        - その後、args を object/object_category に統一（object_or_category は基本消す）
         """
-        state = {"object": None, "object_category": None, "person": None, "person_filter": None}
+        state = {"object": None, "object_category": None}
 
         def update_state_from_args(a: dict):
+            # まず正規化してから state 更新
             a = self._canonicalize_object_fields(a)
 
             if a.get("object"):
                 state["object"] = a["object"]
+                # object が確定したらカテゴリは不明扱い（必要なら残してもOK）
                 state["object_category"] = None
             elif a.get("object_category"):
                 state["object_category"] = a["object_category"]
-
-            # person/name tracking
-            if a.get("name"):
-                state["person"] = a.get("name")
-                state["person_filter"] = None
-            elif a.get("person_filter"):
-                state["person_filter"] = a.get("person_filter")
-
             return a
 
         for st in steps:
             action = st.get("action")
             args = st.get("args", {}) or {}
 
+            # まず既存情報で state 更新（+統一）
             args = update_state_from_args(args)
 
-            def fill_obj_if_missing():
+            # 参照解決：必要なアクションで補完
+            def fill_if_missing():
+                # すでに args に object/object_category があれば何もしない
                 if args.get("object") or args.get("object_category"):
                     return
                 if state["object"]:
@@ -539,17 +468,13 @@ class GpsrParserNode:
                 elif state["object_category"]:
                     args["object_category"] = state["object_category"]
 
-            # actions where "it" is likely
-            if action in (
-                "take_object",
-                "take_object_from_place",
-                "place_object_on_place",
-                "bring_object_to_operator",
-                "deliver_object_to_person_in_room",
-            ):
-                fill_obj_if_missing()
+            if action in ("take_object", "place_object_on_place", "bring_object_to_operator", "deliver_object_to_person_in_room"):
+                fill_if_missing()
 
-            st["args"] = update_state_from_args(args)
+            # 補完後、再度統一（例えば bring に object_category が入ったなど）
+            args = update_state_from_args(args)
+
+            st["args"] = args
 
         return state
 
@@ -562,7 +487,7 @@ class GpsrParserNode:
             "need_confirm": bool(parsed.get("need_confirm", False)),
             "intent_type": parsed.get("intent_type"),
             "raw_text": raw_text,
-            "normalized_text": (raw_text or "").lower(),
+            "normalized_text": raw_text.lower(),
             "confidence": self._latest_conf,
             "source": "parser",
             "command_kind": parsed.get("command_kind"),
@@ -572,7 +497,6 @@ class GpsrParserNode:
             "context": {"lang": self.lang, "source": "parser"},
         }
 
-        # normalize steps
         steps_in = parsed.get("steps") or []
         norm_steps = []
         for s in steps_in:
@@ -586,11 +510,11 @@ class GpsrParserNode:
                 continue
             norm_steps.append({"action": action, "args": dict(args)})
 
-        # reference resolution + unify object/category fields
+        # ★参照解決 + args統一（ここで object_or_category は基本消える）
         state = self._apply_reference_resolution_and_unify(norm_steps)
+
         payload["steps"] = norm_steps
 
-        # infer intent_type/command_kind from first step when missing
         if payload["steps"]:
             a0 = payload["steps"][0]["action"]
             hint = self.ACTION_HINTS.get(a0)
@@ -604,22 +528,19 @@ class GpsrParserNode:
 
         self._fill_slots_from_steps(payload)
 
-        # reflect last object/category into slots if still empty
+        # まだ埋まっていなければ state を反映
         if payload["slots"].get("object") is None and state.get("object"):
             payload["slots"]["object"] = state["object"]
         if payload["slots"].get("object_category") is None and state.get("object_category"):
             payload["slots"]["object_category"] = state["object_category"]
 
-        # stringify place-like fields
+        # place文字列化
         for k in ["source_place", "destination_place"]:
             payload["slots"][k] = _place_to_name(payload["slots"].get(k))
 
         for st in payload["steps"]:
             a = st.get("args", {})
-            for key in [
-                "place", "from_place", "to_place", "location",
-                "source_place", "destination_place", "from_location", "to_location"
-            ]:
+            for key in ["place", "from_place", "to_place", "location", "source_place", "destination_place"]:
                 if key in a:
                     a[key] = _place_to_name(a.get(key))
 
@@ -639,101 +560,47 @@ class GpsrParserNode:
             action = st["action"]
             args = st.get("args", {}) or {}
 
-            # manipulation/navigation
             if action == "find_object_in_room":
                 set_if_empty("source_room", args.get("room"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
 
-            if action in ("take_object", "take_object_from_place"):
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
-                set_if_empty("source_place", args.get("place") or args.get("source_place") or args.get("from_place"))
+            if action == "take_object":
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
 
             if action == "place_object_on_place":
-                set_if_empty("destination_place", args.get("place") or args.get("to_place"))
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+                set_if_empty("destination_place", args.get("place"))
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
 
             if action == "bring_object_to_operator":
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+                if args.get("object"):
+                    set_if_empty("object", args.get("object"))
+                if args.get("object_category"):
+                    set_if_empty("object_category", args.get("object_category"))
                 set_if_empty("source_place", args.get("source_place") or args.get("place"))
 
-            if action == "deliver_object_to_person_in_room":
-                set_if_empty("object", args.get("object"))
-                set_if_empty("object_category", args.get("object_category"))
+            if action == "count_persons_in_room":
+                set_if_empty("source_room", args.get("room"))
+                set_if_empty("question_type", "count_people")
+                set_if_empty("attribute", args.get("person_filter_plural"))
+
+            if action == "answer_to_person_in_room":
                 set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
-
-            if action == "go_to_location":
-                set_if_empty("destination_place", args.get("location") or args.get("place"))
-
-            # social / follow / guide
-            if action == "meet_person_in_room":
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("name"))
-                set_if_empty("attribute", args.get("person_filter"))
-
-            if action in ("greet_named_person_in_room", "introduce_self_to_named_person_in_room"):
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person", args.get("name"))
-
-            if action in ("greet_person_in_room", "introduce_self_to_person_in_room"):
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("attribute", args.get("person_filter"))
-
-            if action in ("follow_last_person", "guide_last_person_to_place"):
-                set_if_empty("destination_place", args.get("to_place") or args.get("place") or args.get("location"))
+                if args.get("person_filter"):
+                    set_if_empty("attribute", args.get("person_filter"))
 
             if action == "guide_named_person_from_place_to_place":
                 set_if_empty("person", args.get("name"))
                 set_if_empty("source_place", args.get("from_place"))
                 set_if_empty("destination_place", args.get("to_place"))
-
-            # Q&A
-            if action == "count_persons_in_room":
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("question_type", "count_people")
-                set_if_empty("attribute", args.get("person_filter_plural") or args.get("person_filter"))
-
-            if action == "answer_to_person_in_room":
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
-                if args.get("question_type"):
-                    set_if_empty("question_type", args.get("question_type"))
-
-            if action == "tell_name_of_person_at_place":
-                set_if_empty("source_place", args.get("place"))
-                set_if_empty("destination_place", args.get("to_place"))
-                set_if_empty("person_at_destination", args.get("to_person_filter") or args.get("to_name"))
-
-            # B: tell/say info
-            if action in ("tell_information_to_person_in_room", "tell_information_to_person_at_place"):
-                set_if_empty("info_type", args.get("info_type"))
-                set_if_empty("info_text", args.get("info_text"))
-                if action.endswith("_in_room"):
-                    set_if_empty("destination_room", args.get("room"))
-                else:
-                    set_if_empty("destination_place", args.get("place"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
-
-            # C2: tell pose/gesture attribute
-            if action in ("tell_person_attribute_in_room", "tell_person_attribute_at_place"):
-                if action.endswith("_in_room"):
-                    set_if_empty("source_room", args.get("room"))
-                else:
-                    set_if_empty("source_place", args.get("place"))
-                set_if_empty("attribute", args.get("attribute") or args.get("person_filter") or args.get("target"))
-                # parser may give "attribute_type" (pose/gesture)
-                if args.get("attribute_type") == "gesture":
-                    set_if_empty("gesture", args.get("attribute") or args.get("person_filter"))
-                if args.get("attribute_type") == "pose":
-                    set_if_empty("pose", args.get("attribute") or args.get("person_filter"))
-
-        # normalize place-like slots at end
-        slots["source_place"] = _place_to_name(slots.get("source_place"))
-        slots["destination_place"] = _place_to_name(slots.get("destination_place"))
 
 
 def main():
