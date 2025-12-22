@@ -69,13 +69,13 @@
        ======================= -->
   <group if="$(arg start_rms_monitor)">
     <node pkg="hsr_audio_pipeline" type="audio_rms_monitor.py" name="audio_rms_monitor" output="screen">
-      <param name="audio_topic" value="/audio/"/>
+      <param name="audio_topic" value="/audio"/>
     </node>
   </group>
 
   <group if="$(arg start_vad)">
     <node pkg="hsr_audio_pipeline" type="silero_vad_node.py" name="silero_vad" output="screen">
-      <param name="audio_topic"        value="/audio/"/>
+      <param name="audio_topic"        value="/audio"/>
       <param name="vad_topic"          value="$(arg vad_topic)"/>
       <param name="sample_rate"        value="$(arg sample_rate)"/>
       <param name="chunk_size"         value="512"/>
@@ -92,10 +92,10 @@
        ======================= -->
   <node pkg="hsr_audio_pipeline" type="faster_whisper_asr_node.py"
         name="faster_whisper_asr_node" output="screen">
-    <param name="audio_topic"         value="/audio/"/>
+    <param name="audio_topic"         value="/audio"/>
     <param name="vad_topic"           value="$(arg vad_topic)"/>
     <param name="text_topic"          value="$(arg asr_text_topic)"/>
-    <param name="confidence_topic"    value="$(argasr_conf_topic)"/>
+    <param name="confidence_topic"    value="$(arg asr_conf_topic)"/>
     <param name="utterance_end_topic" value="$(arg utt_end_topic)"/>
 
     <param name="language"            value="$(arg language)"/>
