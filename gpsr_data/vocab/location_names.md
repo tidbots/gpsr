@@ -25,6 +25,7 @@
 | 22 | sofa (p) |
 | 23 | bookshelf (p) | toys |
 | 24 | entrance |
-| 25 | exit |
+| 25 | desk lamp |
+| 26 | exit |
 
 (p) indicated whether objects can be placed at the location
