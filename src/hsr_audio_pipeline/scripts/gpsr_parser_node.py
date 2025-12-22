@@ -627,102 +627,127 @@ class GpsrParserNode:
 
         return payload
 
+
     def _fill_slots_from_steps(self, payload: dict):
-        slots = payload["slots"]
-        steps = payload.get("steps", [])
+        """Back-fill slots from steps for downstream consistency.
+
+        This is intentionally conservative: it only fills slots that are currently None.
+        """
+        slots = payload.get("slots") or {}
+        steps = payload.get("steps", []) or []
+        norm = (payload.get("normalized_text") or payload.get("raw_text") or "").lower()
 
         def set_if_empty(key, val):
             if val is None:
                 return
+            if isinstance(val, str) and not val.strip():
+                return
             if slots.get(key) is None:
                 slots[key] = val
 
+        def extract_pose(text: str):
+            t = (text or "").lower()
+            for p in ("lying", "sitting", "standing"):
+                if p in t:
+                    return p
+            return None
+
+        def place_name(x):
+            return _place_to_name(x)
+
         for st in steps:
-            action = st["action"]
+            action = st.get("action")
             args = st.get("args", {}) or {}
 
-            # manipulation/navigation
+            # --- navigation ---
             if action == "go_to_location":
-                # navigation to symbolic place/location
-                if args.get("location"):
-                    set_if_empty("destination_place", args.get("location"))
+                set_if_empty("destination_place", args.get("location") or args.get("place"))
+            elif action == "go_to_room":
+                set_if_empty("destination_room", args.get("room"))
+
+            # --- perception / search ---
+            elif action == "find_object_in_room":
+                set_if_empty("source_room", args.get("room"))
+                obj = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if obj:
+                    # If it matches known objects, prefer object; otherwise treat as category
+                    if hasattr(self.vocab, "objects") and obj in self.vocab.objects:
+                        set_if_empty("object", obj)
+                    else:
+                        # categories like 'cleaning supply'
+                        set_if_empty("object_category", obj)
+            elif action == "find_object_at_place":
+                set_if_empty("source_place", args.get("place"))
+                obj = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if obj:
+                    if hasattr(self.vocab, "objects") and obj in self.vocab.objects:
+                        set_if_empty("object", obj)
+                    else:
+                        set_if_empty("object_category", obj)
+
+            # --- grasp / take ---
+            elif action in ("take_object", "grasp_object", "pick_object"):
+                obj = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if obj:
+                    if hasattr(self.vocab, "objects") and obj in self.vocab.objects:
+                        set_if_empty("object", obj)
+                    else:
+                        set_if_empty("object_category", obj)
+
+            # --- place / put ---
+            elif action in ("place_object_on_place", "put_object_on_place"):
+                set_if_empty("destination_place", args.get("place") or args.get("location"))
+                obj = args.get("object") or args.get("object_or_category") or args.get("object_category")
+                if obj:
+                    if hasattr(self.vocab, "objects") and obj in self.vocab.objects:
+                        set_if_empty("object", obj)
+                    else:
+                        set_if_empty("object_category", obj)
+
+            # --- deliver / give ---
+            elif action in (
+                "deliver_object_to_person_in_room",
+                "give_object_to_person_in_room",
+                "bring_object_to_person_in_room",
+                "deliver_object_to_person_at_place",
+                "give_object_to_person_at_place",
+                "bring_object_to_person_at_place",
+                "bring_object_to_operator",
+                "bring_object_to_operator_in_room",
+            ):
+                # destination
+                if "room" in args and args.get("room"):
+                    set_if_empty("destination_room", args.get("room"))
+                if "place" in args and args.get("place"):
+                    set_if_empty("destination_place", args.get("place"))
+                # person
+                pf = args.get("person_filter") or args.get("name") or args.get("person")
+                set_if_empty("person_at_destination", pf)
+                # pose
+                set_if_empty("pose", extract_pose(pf))
+
+            # --- Q/A and description ---
+            elif action in ("answer_to_person_in_room", "tell_person_info_in_room"):
+                # keep destination room if present
                 if args.get("room"):
                     set_if_empty("destination_room", args.get("room"))
+                pf = args.get("person_filter") or args.get("name") or args.get("person")
+                set_if_empty("person_at_destination", pf)
+                set_if_empty("pose", extract_pose(pf))
 
-            if action == "find_object_in_room":
-                set_if_empty("source_room", args.get("room"))
-                # parser may use either object/object_category OR object_or_category (unified earlier)
-                if args.get("object"):
-                    set_if_empty("object", args.get("object"))
-                if args.get("object_category"):
-                    set_if_empty("object_category", args.get("object_category"))
-                set_if_empty("source_place", args.get("source_place") or args.get("place"))
-
-            if action in ("take_object", "take_object_from_place"):
-                if args.get("object"):
-                    set_if_empty("object", args.get("object"))
-                if args.get("object_category"):
-                    set_if_empty("object_category", args.get("object_category"))
-                set_if_empty("source_place", args.get("place") or args.get("from_place") or args.get("source_place"))
-
-            if action == "deliver_object_to_person_in_room":
-                # give / deliver to a person in a room (possibly pose-based)
-                set_if_empty("destination_room", args.get("room"))
-                if args.get("name"):
-                    set_if_empty("person", args.get("name"))
-                    set_if_empty("person_at_destination", args.get("name"))
-                # person_filter examples: "lying person", "person sitting", "tall person"
-                pf = args.get("person_filter") or args.get("person_filter_singular") or args.get("person_filter_plural")
-                if pf:
-                    set_if_empty("attribute", pf)
-                    # extract pose if present
-                    mpose = re.search(r"\b(lying|sitting|standing)\b", str(pf))
-                    if mpose:
-                        set_if_empty("pose", mpose.group(1))
-                        set_if_empty("person_at_destination", f"{mpose.group(1)} person")
-
-            if action == "count_persons_in_room":
-                set_if_empty("source_room", args.get("room"))
-                set_if_empty("question_type", "count_people")
-                set_if_empty("attribute", args.get("person_filter_plural") or args.get("person_filter"))
-
-            if action == "answer_to_person_in_room":
-                set_if_empty("destination_room", args.get("room"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
-                if args.get("question_type"):
-                    set_if_empty("question_type", args.get("question_type"))
-
-            if action == "tell_name_of_person_at_place":
-                set_if_empty("source_place", args.get("place"))
-                set_if_empty("destination_place", args.get("to_place"))
-                set_if_empty("person_at_destination", args.get("to_person_filter") or args.get("to_name"))
-
-            # B: tell/say info
-            if action in ("tell_information_to_person_in_room", "tell_information_to_person_at_place"):
-                set_if_empty("info_type", args.get("info_type"))
-                set_if_empty("info_text", args.get("info_text"))
-                if action.endswith("_in_room"):
-                    set_if_empty("destination_room", args.get("room"))
-                else:
-                    set_if_empty("destination_place", args.get("place"))
-                set_if_empty("person_at_destination", args.get("person_filter") or args.get("name"))
-
-            # C2: tell pose/gesture attribute
-            if action in ("tell_person_attribute_in_room", "tell_person_attribute_at_place"):
-                if action.endswith("_in_room"):
-                    set_if_empty("source_room", args.get("room"))
-                else:
-                    set_if_empty("source_place", args.get("place"))
-                set_if_empty("attribute", args.get("attribute") or args.get("person_filter") or args.get("target"))
-                # parser may give "attribute_type" (pose/gesture)
-                if args.get("attribute_type") == "gesture":
-                    set_if_empty("gesture", args.get("attribute") or args.get("person_filter"))
-                if args.get("attribute_type") == "pose":
-                    set_if_empty("pose", args.get("attribute") or args.get("person_filter"))
+        # --- fallback from normalized text for common categories ---
+        if slots.get("object_category") is None:
+            # minimal, safe heuristics for GPSR frequent categories
+            for cat in ("cleaning supply", "drink", "snack", "fruit", "food"):
+                if cat in norm:
+                    set_if_empty("object_category", cat)
+                    break
 
         # normalize place-like slots at end
-        slots["source_place"] = _place_to_name(slots.get("source_place"))
-        slots["destination_place"] = _place_to_name(slots.get("destination_place"))
+        slots["source_place"] = place_name(slots.get("source_place"))
+        slots["destination_place"] = place_name(slots.get("destination_place"))
+        payload["slots"] = slots
+
 
 
     def _refine_command_kind_and_slots(self, payload: dict):
