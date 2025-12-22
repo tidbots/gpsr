@@ -14,7 +14,8 @@ services:
     # 端末をそのまま使えるように
     stdin_open: true
     tty: true
-
+    group_add:
+      - audio
     # オーディオデバイスをコンテナに渡す
     devices:
       - "/dev/snd:/dev/snd"
