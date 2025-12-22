@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-gpsr_smach_node.py (DUMMY executor)
+gpsr_smach_node.py (DUMMY executor with QUEUE + COALESCE)
 
 Subscribes:
   - /gpsr/intent_json (std_msgs/String)  # gpsr_intent_v1 JSON string
@@ -14,12 +14,16 @@ Publishes:
 Goal:
   End-to-end "ASR -> parser -> executor" wiring using SMACH,
   without robot dependencies (nav/manip are dummy).
+  Adds:
+    - task queue (no drop when busy)
+    - coalesce same text within a window (avoid duplicate intents)
 """
 
 import json
 import time
 import threading
-from typing import Any, Dict, List, Optional
+import queue
+from typing import Any, Dict, List
 
 import rospy
 import smach
@@ -53,6 +57,9 @@ class TaskStatusPub:
 class DummyStepState(smach.State):
     """
     Executes one step from intent["steps"][i] in a dummy way.
+
+    You can force behavior per step by adding:
+      step["dummy"] = {"result":"failed"|"timeout"|"succeeded", "sleep_sec": 0.2}
     """
     def __init__(self, status_pub: TaskStatusPub, step_timeout: float):
         super().__init__(
@@ -76,11 +83,8 @@ class DummyStepState(smach.State):
         action = step.get("action", "")
         args = step.get("args", {}) or {}
 
-        # --- Dummy behavior controls ---
-        # You can force failure by putting:
-        #   {"action":"...", "args":{...}, "dummy":{"result":"failed"}}
         dummy = step.get("dummy", {}) or {}
-        forced = dummy.get("result", "")  # "succeeded" | "failed" | "timeout"
+        forced = str(dummy.get("result", "")).strip().lower()  # succeeded|failed|timeout
         sleep_sec = float(dummy.get("sleep_sec", 0.2))
 
         self.status_pub.status(
@@ -93,21 +97,13 @@ class DummyStepState(smach.State):
         self.status_pub.event(f"[DUMMY] step[{idx}] action={action} args={args}")
 
         t0 = time.time()
-        # pretend doing work
         if sleep_sec > 0:
             time.sleep(min(sleep_sec, self.step_timeout))
 
-        # timeout check
         if (time.time() - t0) > self.step_timeout:
-            self.status_pub.status(
-                "STEP_TIMEOUT",
-                task_id,
-                step_index=idx,
-                action=action,
-            )
+            self.status_pub.status("STEP_TIMEOUT", task_id, step_index=idx, action=action)
             return "timeout"
 
-        # forced result
         if forced == "failed":
             self.status_pub.status("STEP_FAILED", task_id, step_index=idx, action=action)
             return "failed"
@@ -115,7 +111,7 @@ class DummyStepState(smach.State):
             self.status_pub.status("STEP_TIMEOUT", task_id, step_index=idx, action=action)
             return "timeout"
 
-        # default: succeed
+        # default success
         self.status_pub.status("STEP_DONE", task_id, step_index=idx, action=action)
         ud.step_index = idx + 1
         return "succeeded"
@@ -125,35 +121,51 @@ class DummyExecutorNode:
     def __init__(self):
         # ---- params ----
         self.intent_topic = rospy.get_param("~intent_topic", "/gpsr/intent_json")
-
         self.status_topic = rospy.get_param("~status_topic", "/gpsr/task/status")
         self.event_topic = rospy.get_param("~event_topic", "/gpsr/task/event")
 
-        self.auto_run = bool(rospy.get_param("~auto_run", True))  # if False, ignore intents
-        self.drop_if_busy = bool(rospy.get_param("~drop_if_busy", True))
-        self.step_timeout = float(rospy.get_param("~step_timeout", 5.0))
+        self.auto_run = bool(rospy.get_param("~auto_run", True))
 
-        # optional: execute only if ok==true and need_confirm==false
+        # acceptance rules
         self.require_ok = bool(rospy.get_param("~require_ok", True))
         self.require_no_confirm = bool(rospy.get_param("~require_no_confirm", True))
+
+        # dummy exec
+        self.step_timeout = float(rospy.get_param("~step_timeout", 5.0))
+        self.introspection = bool(rospy.get_param("~introspection", False))
+
+        # queue + coalesce
+        self.queue_size = int(rospy.get_param("~queue_size", 10))
+        self.coalesce_same_text_sec = float(rospy.get_param("~coalesce_same_text_sec", 1.0))
+        self.max_queue_wait_sec = float(rospy.get_param("~max_queue_wait_sec", 120.0))  # drop if too old in queue
 
         self.status_pub = TaskStatusPub(self.status_topic, self.event_topic)
 
         self._lock = threading.Lock()
-        self._busy = False
         self._last_task_id = 0
 
-        rospy.Subscriber(self.intent_topic, String, self._on_intent, queue_size=10)
+        # queue items: {"intent":..., "enq_time":..., "text_key":...}
+        self._q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=self.queue_size)
+
+        self._last_accept_text = ""
+        self._last_accept_time = 0.0
+
+        rospy.Subscriber(self.intent_topic, String, self._on_intent, queue_size=50)
+
+        threading.Thread(target=self._worker_loop, daemon=True).start()
 
         rospy.loginfo(
-            "gpsr_smach_node (DUMMY) ready: intent=%s status=%s event=%s auto_run=%s drop_if_busy=%s",
+            "gpsr_smach_node (DUMMY+QUEUE) ready: intent=%s status=%s event=%s queue=%d coalesce=%.2fs",
             self.intent_topic, self.status_topic, self.event_topic,
-            self.auto_run, self.drop_if_busy
+            self.queue_size, self.coalesce_same_text_sec
         )
 
     def _next_task_id(self) -> str:
         self._last_task_id += 1
         return f"task-{self._last_task_id:04d}"
+
+    def _intent_text_key(self, intent: Dict[str, Any]) -> str:
+        return (intent.get("normalized_text") or intent.get("raw_text") or "").strip().lower()
 
     def _on_intent(self, msg: String):
         if not self.auto_run:
@@ -172,24 +184,59 @@ class DummyExecutorNode:
             self.status_pub.event("[DUMMY] ignore intent: need_confirm=true")
             return
 
-        with self._lock:
-            if self._busy:
-                if self.drop_if_busy:
-                    self.status_pub.event("[DUMMY] drop intent: busy")
-                    return
-                # else: ignore new intents until done (still drop)
-                self.status_pub.event("[DUMMY] ignore intent: busy")
-                return
-            self._busy = True
+        text_key = self._intent_text_key(intent)
+        t = time.time()
 
-        task_id = self._next_task_id()
-        threading.Thread(target=self._run_task, args=(task_id, intent), daemon=True).start()
+        # coalesce duplicates in short time window
+        if text_key and text_key == self._last_accept_text and (t - self._last_accept_time) < self.coalesce_same_text_sec:
+            self.status_pub.event("[DUMMY] coalesce intent: same text")
+            return
+
+        item = {"intent": intent, "enq_time": t, "text_key": text_key}
+
+        try:
+            self._q.put_nowait(item)
+            self._last_accept_text = text_key
+            self._last_accept_time = t
+            self.status_pub.event(f"[DUMMY] enqueue intent (qsize={self._q.qsize()}/{self.queue_size})")
+        except queue.Full:
+            self.status_pub.event("[DUMMY] drop intent: queue full")
+
+    def _worker_loop(self):
+        while not rospy.is_shutdown():
+            try:
+                item = self._q.get(timeout=0.2)
+            except Exception:
+                continue
+
+            enq_time = float(item.get("enq_time", time.time()))
+            if (time.time() - enq_time) > self.max_queue_wait_sec:
+                self.status_pub.event("[DUMMY] drop queued intent: too old")
+                try:
+                    self._q.task_done()
+                except Exception:
+                    pass
+                continue
+
+            intent = item.get("intent") or {}
+            task_id = self._next_task_id()
+
+            self._run_task(task_id, intent)
+
+            try:
+                self._q.task_done()
+            except Exception:
+                pass
 
     def _run_task(self, task_id: str, intent: Dict[str, Any]):
         try:
-            self.status_pub.status("TASK_START", task_id, intent_type=intent.get("intent_type"), raw_text=intent.get("raw_text"))
+            self.status_pub.status(
+                "TASK_START",
+                task_id,
+                intent_type=intent.get("intent_type"),
+                raw_text=intent.get("raw_text"),
+            )
 
-            # Build a SMACH state machine: loop DummyStepState until done
             sm = smach.StateMachine(outcomes=["SUCCEEDED", "FAILED", "TIMEOUT"])
             sm.userdata.intent = intent
             sm.userdata.step_index = 0
@@ -206,16 +253,14 @@ class DummyExecutorNode:
                     },
                 )
 
-            # Introspection (optional; keep false in competition)
-            enable_viewer = bool(rospy.get_param("~introspection", False))
             sis = None
-            if enable_viewer:
+            if self.introspection:
                 sis = smach_ros.IntrospectionServer("gpsr_smach_introspection", sm, "/GPSR_SM")
                 sis.start()
 
             outcome = sm.execute()
 
-            if enable_viewer and sis is not None:
+            if self.introspection and sis is not None:
                 sis.stop()
 
             if outcome == "FAILED":
@@ -228,8 +273,6 @@ class DummyExecutorNode:
         except Exception as e:
             self.status_pub.status("TASK_EXCEPTION", task_id, error=str(e))
         finally:
-            with self._lock:
-                self._busy = False
             self.status_pub.status("TASK_END", task_id)
 
 
