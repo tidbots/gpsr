@@ -1,6 +1,93 @@
 # General Purpose Service Robot 汎用サービスロボット
 ロボットは、幅広く異なる能力を必要とする命令を理解し実行することが求められる。
 
+## 簡単に試す方法
+```
+cd ~/
+git clone https://github.com/tidbots/gpsr.git
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose build
+docker compose up -d
+docker compose exec noetic-audio bash
+roslaunch hsr_audio_pipeline gpsr_audio_intent_test.launch
+```
+エラーがなければマイクに向かって発話すると，認識した文字列が表示されるはずです．
+```
+Tell me how many people in the bathroom are wearing white sweaters
+Tell the gesture of the person at the bedside table to the person at the dishwasher
+```
+などと発話してみて下さい．
+https://github.com/tidbots/Text-to-speech　を使ってPCに発話させたところ，高精度で認識していました．
+
+発話認識結果や命令文の解釈などは別のターミナルからトピックを読んでください．
+## コマンドを解析した文字列を表示
+別のターミナルから
+```
+cd ~/gpsr
+export PULSE_SERVER=unix:/run/user/1000/pulse/native
+docker compose exec noetic-audio bash
+```
+```
+rostopic echo  /gpsr/intent_json
+```
+あるいは，文字化けしないバージョン
+```
+rosrun hsr_audio_pipeline gpsr_intent_echo.py
+```
+
+「Find a cleaning supply in the bedroom then get it and put it on the refrigerator」と発話すると，以下のような解釈に落とされるはずです
+
+$ rostopic echo -n 1 /gpsr/intent_json
+data:
+{
+	"schema": "gpsr_intent_v1",
+	"ok": true,
+	"need_confirm": false,
+	"intent_type": "composite",
+	"raw_text": "Find a cleaning supply in the bedroom then get it and put it on the refrigerator",
+	"normalized_text": "find a cleaning supply in the bedroom then get it and put it on the refrigerator",
+	"confidence": null,
+	"source": "parser",
+	"command_kind": "placeObjOnPlcmt",
+	"slots\":
+	 {
+		"object": null,
+		"object_category": "cleaning supply",
+		"quantity": null,
+		"source_room": "bedroom",
+		"source_place": null,
+		"destination_room": null,
+		"destination_place": "refrigerator",
+		"person": null,
+		"person_at_source": null,
+		"person_at_destination": null,
+		"question_type": null,
+		"attribute": null,
+		"comparison": null,
+		"gesture": null,
+		"pose": null,
+		"info_type": null,
+		"info_text": null
+	},
+	"steps": [
+		{"action": "find_object_in_room","args": {"room": "bedroom"}},
+		{"action": "take_object", "args": {}},
+		{"action": "place_object_on_place", "args": {"place": "refrigerator"}}
+		],
+	"extras": {"legacy_slots": {}},
+	"context": {"lang": "en", "source" : "parser"}
+}
+
+
+次に， /gpsr/intent_jsonをSmachが順番に実行します（これはまだデバッグ中です）・・・
+
+
+
+
+
+
+
 
 
 
@@ -112,7 +199,7 @@ rosrun hsr_audio_pipeline gpsr_intent_echo.py
 命令文はCommandGeneratorで作る<br>
 [CommandGenerator](https://github.com/RoboCupAtHome/CommandGenerator)
 
-命令のサンプル (command.txt)
+命令のサンプル (commands.txt)
 ```
 Tell me how many people in the bathroom are wearing white sweaters
 Tell the gesture of the person at the bedside table to the person at the dishwasher
